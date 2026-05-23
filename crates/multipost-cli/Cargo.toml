@@ -1,0 +1,26 @@
+[package]
+name = "multipost-cli"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "multipost gRPC client + CLI."
+
+[[bin]]
+name = "multipost"
+path = "src/main.rs"
+
+[dependencies]
+multipost-proto.workspace = true
+multipost-storage.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+chrono.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package posts;
+
+import "common.proto";
+import "google/protobuf/timestamp.proto";
+
+service Posts {
+  // Submit a piece of content for publishing across one or more accounts.
+  // Each (content, account) pair becomes a Job.
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+
+  // Get a single job. Optional long-poll via `wait_seconds` on the request.
+  rpc GetJob(GetJobRequest) returns (Job);
+
+  // List jobs (paginated).
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+
+  // Cancel a job that hasn't yet been submitted to the platform.
+  rpc Cancel(JobRef) returns (Job);
+
+  // Stream a job's state transitions.
+  rpc Watch(JobRef) returns (stream JobEvent);
+
+  // Note: `Schedule` and `Retry` RPCs were removed in Phase 5. See
+  // design.md §22 — caller-owned scheduling/retry, multipost executes
+  // one attempt per Submit.
+}
+
+message Content {
+  string text = 1;
+  repeated string hashtags = 2;
+  // Media IDs from the Media service.
+  repeated string media_ids = 3;
+  common.Visibility visibility = 4;
+  google.protobuf.Timestamp schedule_at = 5;
+}
+
+message SubmitRequest {
+  Content content = 1;
+  // Account IDs to post from.
+  repeated string account_ids = 2;
+}
+
+message SubmitResponse {
+  // One job per (content, account) pair.
+  repeated Job jobs = 1;
+}
+
+message Job {
+  string id = 1;
+  string content_id = 2;
+  string account_id = 3;
+  common.JobState state = 4;
+  int32 attempts = 5;
+  string last_error = 6;
+  // Platform-side post ID once submitted.
+  string external_id = 7;
+  string permalink = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+message JobRef {
+  string id = 1;
+}
+
+// GetJobRequest extends JobRef with optional long-polling. When
+// `wait_seconds > 0` AND the job's current state is non-terminal, the
+// server blocks for up to `wait_seconds` (capped server-side at 60s)
+// waiting for the next state transition, then returns the job.
+// `wait_seconds = 0` (the default) returns immediately, equivalent to
+// the old JobRef-typed GetJob.
+message GetJobRequest {
+  string id = 1;
+  int32 wait_seconds = 2;
+}
+
+message ListJobsRequest {
+  // Optional: filter by state.
+  common.JobState state = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
+  string next_page_token = 2;
+}
+
+message JobEvent {
+  string job_id = 1;
+  common.JobState state = 2;
+  string detail = 3;
+  google.protobuf.Timestamp at = 4;
+}

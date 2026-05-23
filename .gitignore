@@ -1,0 +1,40 @@
+target/
+**/*.rs.bk
+
+# Secrets and runtime state
+.env
+.env.local
+secrets/
+profiles/
+tokens.json
+oauth_state.json
+bootstrap.token
+
+# Local dev artifacts
+*.db
+*.db-shm
+*.db-wal
+*.log
+.pgdata/
+.rustfs-data/
+
+# Per-script runtime state — these accumulate platform tokens, draft
+# media-IDs, downloaded videos, browser-attach state, and screenshots
+# from manual probes.
+scripts/wechat-mp/artifacts.json
+scripts/wechat-mp/token_cache.json
+scripts/*/.pwright/
+scripts/*/screenshots/
+scripts/youtube/downloads/
+scripts/*/__pycache__/
+
+# Your actual editorial content. Drafts under articles/ are personal —
+# keep them on disk for the publish scripts to read but never commit.
+# An EXAMPLE.md is tracked as a format reference.
+scripts/wechat-mp/articles/*.md
+!scripts/wechat-mp/articles/EXAMPLE.md
+
+# Editors
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,22 @@
+[package]
+name = "multipost-publishers-wx-gzh"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "WeChat MP (公众号) publisher for multipost."
+
+[dependencies]
+multipost-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+pulldown-cmark.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

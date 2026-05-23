@@ -1,0 +1,42 @@
+[package]
+name = "multipost-server"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "multipost gRPC server + OAuth callback HTTP listener."
+
+[[bin]]
+name = "multipost-server"
+path = "src/main.rs"
+
+[dependencies]
+multipost-core.workspace = true
+multipost-proto.workspace = true
+multipost-storage.workspace = true
+multipost-orchestrator.workspace = true
+multipost-publishers-youtube.workspace = true
+multipost-publishers-wx-gzh.workspace = true
+multipost-publishers-douyin.workspace = true
+multipost-publishers-toutiao.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+tower.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
+chrono.workspace = true
+uuid.workspace = true

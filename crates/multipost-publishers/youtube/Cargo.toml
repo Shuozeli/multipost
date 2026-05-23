@@ -1,0 +1,22 @@
+[package]
+name = "multipost-publishers-youtube"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "YouTube Data API v3 publisher for multipost."
+
+[dependencies]
+multipost-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true

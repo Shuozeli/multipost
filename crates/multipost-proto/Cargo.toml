@@ -1,0 +1,16 @@
+[package]
+name = "multipost-proto"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Protocol Buffers definitions for multipost's gRPC API."
+
+[dependencies]
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

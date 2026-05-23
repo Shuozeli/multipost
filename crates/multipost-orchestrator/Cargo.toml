@@ -1,0 +1,19 @@
+[package]
+name = "multipost-orchestrator"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Job orchestrator (state machine, scheduler, retries) for multipost."
+
+[dependencies]
+multipost-core.workspace = true
+multipost-storage.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package accounts;
+
+import "common.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service Accounts {
+  // Start an auth flow for a platform. Returns either an OAuth URL (API
+  // platforms) or a session pointer (browser-automation platforms).
+  rpc StartAuth(StartAuthRequest) returns (StartAuthResponse);
+
+  // Complete an auth flow after the caller has received a code or
+  // completed an interactive login.
+  rpc CompleteAuth(CompleteAuthRequest) returns (Account);
+
+  // Register a platform account directly with developer credentials.
+  // For platforms that don't use OAuth (e.g. WeChat MP, which uses
+  // appid + app_secret).
+  rpc RegisterDeveloperCredentials(RegisterDeveloperRequest) returns (Account);
+
+  // List accounts for the calling user.
+  rpc List(ListAccountsRequest) returns (ListAccountsResponse);
+
+  // Get a single account by ID.
+  rpc Get(GetAccountRequest) returns (Account);
+
+  // Revoke an account. Removes stored credentials but keeps the row
+  // for audit purposes.
+  rpc Revoke(RevokeRequest) returns (google.protobuf.Empty);
+
+  // Force a credentials check (refresh token, ping platform).
+  rpc CheckAuth(CheckAuthRequest) returns (CheckAuthResponse);
+}
+
+message RegisterDeveloperRequest {
+  common.Platform platform = 1;
+  // Platform-specific credentials JSON.
+  // WxGzh: {"appid": "wx...", "app_secret": "..."}
+  string credentials_json = 2;
+}
+
+message Account {
+  string id = 1;
+  common.Platform platform = 2;
+  // Platform-side handle (e.g. @username).
+  string display_name = 3;
+  // Platform-side ID (channel ID, MP appid, etc.).
+  string external_id = 4;
+  common.AuthStatus auth_status = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp last_used_at = 7;
+}
+
+message StartAuthRequest {
+  common.Platform platform = 1;
+}
+
+message StartAuthResponse {
+  oneof method {
+    // For OAuth platforms — the URL the user should open in a browser.
+    string auth_url = 1;
+    // For browser-automation platforms — a pointer to a headed session.
+    BrowserAuthSession browser_session = 2;
+  }
+  // Pending-auth state ID; pass back to CompleteAuth.
+  string pending_auth_id = 3;
+}
+
+message BrowserAuthSession {
+  // pwright session ID. Caller would inspect this session interactively.
+  string session_id = 1;
+  // What URL the session was navigated to (so the user knows what to log into).
+  string current_url = 2;
+}
+
+message CompleteAuthRequest {
+  string pending_auth_id = 1;
+  oneof completion {
+    // OAuth: the authorization code (or full callback URL).
+    string code = 2;
+    // Browser: signal that the user has finished logging in.
+    bool browser_logged_in = 3;
+  }
+}
+
+message ListAccountsRequest {
+  // Optional filter by platform.
+  common.Platform platform = 1;
+}
+
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+}
+
+message GetAccountRequest {
+  string id = 1;
+}
+
+message RevokeRequest {
+  string id = 1;
+}
+
+message CheckAuthRequest {
+  string id = 1;
+}
+
+message CheckAuthResponse {
+  common.AuthStatus status = 1;
+  string detail = 2;
+}

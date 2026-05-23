@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package common;
+
+// One of the platforms multipost integrates with.
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_YOUTUBE = 1;
+  PLATFORM_WX_GZH = 2;
+  PLATFORM_TWITTER = 3;
+  PLATFORM_DOUYIN = 4;
+  PLATFORM_TOUTIAO = 5;
+}
+
+// Auth status of a connected account.
+enum AuthStatus {
+  AUTH_STATUS_UNSPECIFIED = 0;
+  AUTH_STATUS_ACTIVE = 1;
+  AUTH_STATUS_EXPIRED = 2;
+  AUTH_STATUS_REVOKED = 3;
+  AUTH_STATUS_PENDING = 4;
+}
+
+// State of a publish job in the orchestrator state machine.
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_QUEUED = 1;
+  JOB_STATE_VALIDATING = 2;
+  JOB_STATE_UPLOADING = 3;
+  JOB_STATE_SUBMITTING = 4;
+  JOB_STATE_CONFIRMING = 5;
+  JOB_STATE_CONFIRMED = 6;
+  JOB_STATE_FAILED = 7;
+  JOB_STATE_CANCELLED = 8;
+}
+
+// Visibility / privacy setting.
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  VISIBILITY_PUBLIC = 1;
+  VISIBILITY_FOLLOWERS = 2;
+  VISIBILITY_UNLISTED = 3;
+  VISIBILITY_PRIVATE = 4;
+}
