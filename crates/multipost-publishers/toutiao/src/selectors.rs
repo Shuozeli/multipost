@@ -49,3 +49,16 @@ pub const TITLE_INPUT: &str = r#"textarea[placeholder*="标题"], input[placehol
 /// filter by bounding box (≥400×100) in the JS scan to pick the main
 /// body editor.
 pub const BODY_EDITOR: &str = r#"[contenteditable="true"]"#;
+
+// ---- 微头条 (Weitoutiao) — Toutiao's short-form social post ----
+
+/// Direct URL to the 微头条 publish editor.
+pub const WEITOUTIAO_URL: &str = "https://mp.toutiao.com/profile_v4/weitoutiao/publish";
+
+/// Where 微头条 posts list lives. Note: the editor's "manage" is just
+/// the bare `/weitoutiao` dashboard, NOT `/weitoutiao/manage` (which
+/// 404s into an empty page).
+pub const WEITOUTIAO_MANAGE_URL: &str = "https://mp.toutiao.com/profile_v4/weitoutiao";
+
+/// Text label on the 微头条 publish button. Auto-publish clicks this.
+pub const WEITOUTIAO_PUBLISH_LABEL: &str = "发布";

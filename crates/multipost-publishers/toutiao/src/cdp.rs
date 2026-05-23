@@ -269,4 +269,50 @@ impl PageSession {
         .await?;
         Ok(())
     }
+
+    /// Dispatch a real OS-level mouse event via CDP `Input.dispatchMouseEvent`.
+    /// Use this when JS-synthesized `MouseEvent`s aren't enough — some
+    /// frameworks (Toutiao's byte-design hover-reveal among them) only
+    /// honor genuine pointer input.
+    ///
+    /// `event` is one of `"mouseMoved"`, `"mousePressed"`, `"mouseReleased"`.
+    pub async fn dispatch_mouse_event(
+        &mut self,
+        event: &str,
+        x: f64,
+        y: f64,
+        button: &str,
+        click_count: u32,
+    ) -> Result<()> {
+        self.send(
+            "Input.dispatchMouseEvent",
+            json!({
+                "type": event,
+                "x": x,
+                "y": y,
+                "button": button,
+                "clickCount": click_count,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Real-mouse click sequence: move → press → release.
+    /// Coordinates are page-relative pixels.
+    pub async fn real_click(&mut self, x: f64, y: f64) -> Result<()> {
+        self.dispatch_mouse_event("mouseMoved", x, y, "none", 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        self.dispatch_mouse_event("mousePressed", x, y, "left", 1).await?;
+        self.dispatch_mouse_event("mouseReleased", x, y, "left", 1).await?;
+        Ok(())
+    }
+
+    /// Real-mouse hover: move to (x, y). Doesn't press.
+    /// A short settle delay so React hover handlers commit.
+    pub async fn real_hover(&mut self, x: f64, y: f64) -> Result<()> {
+        self.dispatch_mouse_event("mouseMoved", x, y, "none", 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(())
+    }
 }

@@ -95,14 +95,37 @@ fn proto_visibility(v: i32) -> Visibility {
     }
 }
 
-fn infer_content_kind(media_count: usize, mime: Option<&str>) -> ContentKind {
+fn infer_content_kind(media_count: usize, mime: Option<&str>, text: &str) -> ContentKind {
     if media_count == 0 {
-        ContentKind::Text
+        // Text-only: distinguish a short post (microblog / tweet-shaped)
+        // from a long-form article. Heuristic: the CLI builds article
+        // text as "TITLE\n\nBODY", so a short first line followed by a
+        // blank line + non-empty body is an article. Otherwise it's
+        // short-form (`ContentKind::Text`).
+        if looks_like_article(text) {
+            ContentKind::Article
+        } else {
+            ContentKind::Text
+        }
     } else if mime.map_or(false, |m| m.starts_with("video/")) {
         ContentKind::LongVideo
     } else {
         ContentKind::Image
     }
+}
+
+/// True iff `text` matches the CLI's "TITLE\n\nBODY" article shape:
+/// first paragraph is reasonably short (≤200 chars — about a headline)
+/// and the body after the blank line is non-empty.
+fn looks_like_article(text: &str) -> bool {
+    let Some(idx) = text.find("\n\n") else {
+        return false;
+    };
+    let title = &text[..idx];
+    let body = &text[idx + 2..];
+    !title.is_empty()
+        && title.chars().count() <= 200
+        && !body.trim().is_empty()
 }
 
 fn build_content_from_proto(
@@ -119,7 +142,7 @@ fn build_content_from_proto(
     Content {
         id: Uuid::new_v4(),
         user_id,
-        kind: infer_content_kind(media_count, mime_hint),
+        kind: infer_content_kind(media_count, mime_hint, &p.text),
         text: p.text,
         hashtags: p.hashtags,
         media: media_ids

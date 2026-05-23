@@ -128,65 +128,56 @@ impl Publisher for ToutiaoPublisher {
         content: &Content,
     ) -> Result<PublishHandle> {
         let creds = parse_credentials(ctx.credentials)?;
-        let (title, body) = split_title_and_body(content);
-
-        // Toutiao caps the title at 30 chars; trim before posting.
-        if title.chars().count() > 30 {
-            return Err(PublishError::Rejected(format!(
-                "toutiao: title is {} chars; cap is 30",
-                title.chars().count()
-            )));
+        match content.kind {
+            multipost_core::ContentKind::Article => publish_article(&creds, content).await,
+            multipost_core::ContentKind::Text => publish_weitoutiao(&creds, content).await,
+            other => Err(PublishError::Rejected(format!(
+                "toutiao: ContentKind::{other:?} not supported \
+                 (only Article → graphic editor and Text → 微头条)"
+            ))),
         }
-        if title.is_empty() {
-            return Err(PublishError::Rejected(
-                "toutiao: content.text must start with a non-empty title line".into(),
-            ));
-        }
-
-        let session = BrowserSession::connect(&creds.cdp_url)
-            .await
-            .map_err(|e| PublishError::Transient(format!("toutiao connect: {e}")))?;
-        let tab = session
-            .create_tab(selectors::PUBLISH_URL)
-            .await
-            .map_err(|e| PublishError::Transient(format!("toutiao create_tab: {e}")))?;
-        tracing::info!(target = %tab.id, "toutiao: opened publish editor tab");
-        let mut page = session
-            .open_page(&tab)
-            .await
-            .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
-
-        let result = run_publish_flow(&mut page, &title, &body).await;
-        result.map(|_| PublishHandle {
-            // Toutiao doesn't surface an aweme_id at publish time, and we
-            // don't click 预览并发布 — so external_id is the article title
-            // (same convention as Douyin's row-lookup-by-title approach).
-            external_id: title.to_string(),
-            permalink: None,
-        })
     }
 
     async fn confirm(
         &self,
         _ctx: &PublishContext<'_>,
-        _handle: &PublishHandle,
+        handle: &PublishHandle,
     ) -> Result<ConfirmStatus> {
-        // Toutiao auto-saves to 草稿箱 as the body is typed. The publish
-        // flow stops *before* 预览并发布, so there's no platform-side
-        // moderation to poll. Treating as immediately Confirmed: the
-        // draft exists; user finalizes manually.
+        // Both Toutiao content types reach Confirmed immediately:
+        //   - articles: auto-saved to 草稿箱 the moment the body lands.
+        //   - 微头条:    `publish_weitoutiao` already polled the dashboard
+        //                until the post was visible, so we know it's live.
+        // We preserve whatever permalink the publish phase set so
+        // `delete()` can route on it (article-draft vs 微头条 paths).
         Ok(ConfirmStatus::Confirmed {
-            permalink: Some(selectors::MANAGE_URL.to_string()),
+            permalink: handle
+                .permalink
+                .clone()
+                .or_else(|| Some(selectors::MANAGE_URL.to_string())),
         })
     }
 
     async fn delete(&self, ctx: &PublishContext<'_>, handle: &PublishHandle) -> Result<()> {
         let creds = parse_credentials(ctx.credentials)?;
-        let title = handle.external_id.as_str();
-        delete_draft_by_title(&creds, title)
-            .await
-            .map_err(|e| PublishError::Transient(format!("toutiao delete: {e}")))?;
-        tracing::info!(title, "toutiao: deleted draft");
+        let ident = handle.external_id.as_str();
+        // Branch on permalink to pick the right page + delete pattern.
+        // publish_weitoutiao sets permalink to WEITOUTIAO_MANAGE_URL;
+        // publish_article leaves it None.
+        let is_weitoutiao = handle
+            .permalink
+            .as_deref()
+            .is_some_and(|u| u.contains("/weitoutiao"));
+        if is_weitoutiao {
+            delete_weitoutiao_by_prefix(&creds, ident)
+                .await
+                .map_err(|e| PublishError::Transient(format!("toutiao 微头条 delete: {e}")))?;
+            tracing::info!(prefix = ident, "toutiao: deleted 微头条");
+        } else {
+            delete_draft_by_title(&creds, ident)
+                .await
+                .map_err(|e| PublishError::Transient(format!("toutiao delete: {e}")))?;
+            tracing::info!(title = ident, "toutiao: deleted draft");
+        }
         Ok(())
     }
 }
@@ -322,6 +313,351 @@ async fn delete_draft_by_title(creds: &ToutiaoCredentials, title: &str) -> anyho
     }
     let _ = session.close_tab(&tab.id).await;
     Ok(())
+}
+
+/// Delete a 微头条 by body-prefix match. Toutiao's dashboard reveals
+/// per-post actions only on real mouse hover (synthetic events are
+/// ignored by the byte-design popover trigger), so we drive this with
+/// CDP `Input.dispatchMouseEvent`:
+///
+/// 1. Open `/profile_v4/weitoutiao`.
+/// 2. Find the post-item containing `prefix`.
+/// 3. Real-mouse hover over it → reveals the "更多" trigger.
+/// 4. Real-mouse click "更多" → opens `byte-popover` with
+///    "分享 / 设为仅我可见 / 删除作品".
+/// 5. JS-click "删除作品" inside the popover (popover items are normal
+///    React handlers; synthetic click works at this point).
+/// 6. JS-click the modal's "确定".
+async fn delete_weitoutiao_by_prefix(
+    creds: &ToutiaoCredentials,
+    prefix: &str,
+) -> anyhow::Result<()> {
+    let session = BrowserSession::connect(&creds.cdp_url).await?;
+    let tab = session.create_tab(selectors::WEITOUTIAO_MANAGE_URL).await?;
+    let mut page = session.open_page(&tab).await?;
+
+    // Wait for at least one post-item to render. Toutiao loads the
+    // dashboard list via XHR; 25s budget.
+    let start = Instant::now();
+    loop {
+        let n = page
+            .evaluate(r#"document.querySelectorAll('[class*="post-item"]:not([class*="post-item-body"])').length"#)
+            .await?
+            .as_u64()
+            .unwrap_or(0);
+        if n > 0 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(25) {
+            anyhow::bail!("weitoutiao dashboard has no rendered posts after 25s");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Locate the matching post-item by body prefix and return its
+    // center coordinates. Walks all `post-item` outer rows (skipping
+    // the `post-item-body` inner duplicates).
+    let prefix_json = serde_json::to_string(prefix)?;
+    let locate_js = format!(
+        r#"(() => {{
+            const want = {prefix_json};
+            const rows = Array.from(document.querySelectorAll('[class*="post-item"]:not([class*="post-item-body"])'));
+            for (const row of rows) {{
+                if (!(row.innerText || '').includes(want)) continue;
+                const r = row.getBoundingClientRect();
+                return {{x: r.x + r.width / 2, y: r.y + r.height / 2}};
+            }}
+            return null;
+        }})()"#
+    );
+    let coord = page.evaluate(&locate_js).await?;
+    let (rx, ry) = match (
+        coord.get("x").and_then(|v| v.as_f64()),
+        coord.get("y").and_then(|v| v.as_f64()),
+    ) {
+        (Some(x), Some(y)) => (x, y),
+        _ => anyhow::bail!("weitoutiao: no row matches prefix {prefix:?}"),
+    };
+
+    // Real hover the row to reveal 更多.
+    page.real_hover(rx, ry).await?;
+
+    // Find 更多 coordinates inside that row.
+    let more_coord_js = format!(
+        r#"(() => {{
+            const want = {prefix_json};
+            const rows = Array.from(document.querySelectorAll('[class*="post-item"]:not([class*="post-item-body"])'));
+            for (const row of rows) {{
+                if (!(row.innerText || '').includes(want)) continue;
+                const more = Array.from(row.querySelectorAll('*'))
+                    .find(e => e.children.length === 0 && (e.innerText || '').trim() === '更多');
+                if (!more) return null;
+                const r = more.getBoundingClientRect();
+                return {{x: r.x + r.width / 2, y: r.y + r.height / 2}};
+            }}
+            return null;
+        }})()"#
+    );
+    let mc = page.evaluate(&more_coord_js).await?;
+    let (mx, my) = match (
+        mc.get("x").and_then(|v| v.as_f64()),
+        mc.get("y").and_then(|v| v.as_f64()),
+    ) {
+        (Some(x), Some(y)) => (x, y),
+        _ => anyhow::bail!("weitoutiao: 更多 not visible on hover"),
+    };
+    // Real click the 更多 trigger.
+    page.real_click(mx, my).await?;
+    tracing::info!(prefix, "toutiao 微头条: clicked 更多");
+
+    // Wait for the popover, then JS-click "删除作品".
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let click_del_js = r#"(() => {
+        // Popover items in byte-design popovers are inside
+        // `.byte-popover-content`; find one labeled "删除作品".
+        const pop = document.querySelector('.byte-popover-open .byte-popover-content, .byte-popover-content');
+        if (!pop) return {ok: false, reason: 'no popover open'};
+        const del = Array.from(pop.querySelectorAll('*'))
+            .find(e => e.children.length === 0 && (e.innerText || '').trim() === '删除作品');
+        if (!del) return {ok: false, reason: 'no 删除作品 in popover'};
+        del.click();
+        return {ok: true};
+    })()"#;
+    let r = page.evaluate(click_del_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("click 删除作品 failed: {r}");
+    }
+    tracing::info!("toutiao 微头条: clicked 删除作品");
+
+    // Confirm the modal.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let confirm_js = r#"(() => {
+        const wanted = ['确定', '确认', '确认删除', '删除'];
+        for (const b of document.querySelectorAll('button')) {
+            if (b.offsetParent === null) continue;
+            const t = (b.innerText || '').trim();
+            if (wanted.includes(t)) { b.click(); return {ok: true, text: t}; }
+        }
+        return {ok: false};
+    })()"#;
+    let r = page.evaluate(confirm_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("confirm delete modal click failed: {r}");
+    }
+    tracing::info!("toutiao 微头条: confirmed delete modal");
+
+    // Wait for the row to disappear (best-effort).
+    let check_gone_js = format!(
+        r#"(() => {{
+            const want = {prefix_json};
+            return !Array.from(document.querySelectorAll('[class*="post-item"]:not([class*="post-item-body"])'))
+                .some(r => (r.innerText || '').includes(want));
+        }})()"#
+    );
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if page.evaluate(&check_gone_js).await?.as_bool().unwrap_or(false) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let _ = session.close_tab(&tab.id).await;
+    Ok(())
+}
+
+/// Long-form article path — graphic editor, fill title + body, stop
+/// before 预览并发布 (Toutiao auto-saves to 草稿箱). Mirrors what the
+/// old inline `publish()` did before the 微头条 split.
+async fn publish_article(
+    creds: &ToutiaoCredentials,
+    content: &Content,
+) -> Result<PublishHandle> {
+    let (title, body) = split_title_and_body(content);
+    if title.chars().count() > 30 {
+        return Err(PublishError::Rejected(format!(
+            "toutiao: title is {} chars; cap is 30",
+            title.chars().count()
+        )));
+    }
+    if title.is_empty() {
+        return Err(PublishError::Rejected(
+            "toutiao article: content.text must start with a non-empty title line".into(),
+        ));
+    }
+
+    let session = BrowserSession::connect(&creds.cdp_url)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao connect: {e}")))?;
+    let tab = session
+        .create_tab(selectors::PUBLISH_URL)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao create_tab: {e}")))?;
+    tracing::info!(target = %tab.id, "toutiao: opened article editor tab");
+    let mut page = session
+        .open_page(&tab)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
+
+    run_publish_flow(&mut page, &title, &body).await?;
+    Ok(PublishHandle {
+        external_id: title.to_string(),
+        permalink: None,
+    })
+}
+
+/// 微头条 (short-form) path — single ProseMirror body, no title.
+/// Auto-publishes (clicks 发布). `external_id` is the first 30 chars of
+/// the body, used for later delete lookups on the 微头条 manage page.
+async fn publish_weitoutiao(
+    creds: &ToutiaoCredentials,
+    content: &Content,
+) -> Result<PublishHandle> {
+    let body = strip_markdown(content.text.trim());
+    if body.is_empty() {
+        return Err(PublishError::Rejected(
+            "toutiao 微头条: empty body".into(),
+        ));
+    }
+    // Toutiao caps 微头条 around 2000 chars in practice. Reject very
+    // long bodies up-front instead of letting the editor truncate.
+    if body.chars().count() > 2000 {
+        return Err(PublishError::Rejected(format!(
+            "toutiao 微头条: body is {} chars; cap is 2000",
+            body.chars().count()
+        )));
+    }
+
+    let session = BrowserSession::connect(&creds.cdp_url)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao connect: {e}")))?;
+    let tab = session
+        .create_tab(selectors::WEITOUTIAO_URL)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao create_tab: {e}")))?;
+    tracing::info!(target = %tab.id, "toutiao: opened 微头条 editor tab");
+    let mut page = session
+        .open_page(&tab)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
+
+    run_weitoutiao_flow(&mut page, &body)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao weitoutiao: {e}")))?;
+
+    let external_id: String = body.chars().take(30).collect();
+    Ok(PublishHandle {
+        external_id,
+        permalink: Some(selectors::WEITOUTIAO_MANAGE_URL.to_string()),
+    })
+}
+
+/// 微头条 publish flow on an already-open tab.
+async fn run_weitoutiao_flow(page: &mut PageSession, body: &str) -> anyhow::Result<()> {
+    let prefix: String = body.chars().take(30).collect();
+    // Wait for the ProseMirror editor to mount.
+    let deadline = Duration::from_secs(45);
+    let start = Instant::now();
+    loop {
+        let probe = page
+            .evaluate(
+                r#"(() => {
+                    const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
+                    const btn = Array.from(document.querySelectorAll('button'))
+                        .find(b => (b.innerText || '').trim() === '发布');
+                    return { ed: !!ed, btn: !!btn };
+                })()"#,
+            )
+            .await?;
+        let ok_ed = probe.get("ed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok_btn = probe.get("btn").and_then(|v| v.as_bool()).unwrap_or(false);
+        if ok_ed && ok_btn {
+            break;
+        }
+        if start.elapsed() > deadline {
+            anyhow::bail!("微头条 editor did not mount within 45s");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    tracing::info!("toutiao: 微头条 editor mounted");
+
+    // Focus + chunked execCommand insertText (same trick as articles).
+    let focus_js = r#"(() => {
+        const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
+        if (!ed) return {ok: false};
+        ed.focus();
+        return {ok: true};
+    })()"#;
+    let r = page.evaluate(focus_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("focus 微头条 editor failed");
+    }
+    for chunk in body.chars().collect::<Vec<_>>().chunks(800) {
+        let piece: String = chunk.iter().collect();
+        let val = serde_json::to_string(&piece)?;
+        let js = format!(
+            r#"(() => {{ document.execCommand('insertText', false, {val}); return true; }})()"#
+        );
+        let _ = page.evaluate(&js).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tracing::info!(chars = body.chars().count(), "toutiao: 微头条 body filled");
+
+    // Click 发布. Wait briefly for the button to become enabled after the
+    // editor commits the inserted text.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let click_js = r#"(() => {
+        const btn = Array.from(document.querySelectorAll('button'))
+            .find(b => (b.innerText || '').trim() === '发布' && b.offsetParent !== null && !b.disabled);
+        if (!btn) return {ok: false, reason: 'no enabled 发布 button'};
+        btn.click();
+        return {ok: true};
+    })()"#;
+    let r = page.evaluate(click_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("发布 click failed: {r}");
+    }
+    tracing::info!("toutiao: clicked 微头条 发布");
+
+    // Tight success detection: the editor going empty + URL going to
+    // /weitoutiao only proves "we navigated away" — silently-dropped
+    // posts have the same outcome. The real signal is the new post
+    // showing up in the dashboard's post-list with our body prefix.
+    // We navigate to the dashboard ourselves (the post-publish redirect
+    // doesn't reliably land there) and poll.
+    page.navigate(selectors::WEITOUTIAO_MANAGE_URL)
+        .await
+        .map_err(|e| anyhow::anyhow!("nav to weitoutiao dashboard: {e}"))?;
+
+    let prefix_json = serde_json::to_string(&prefix)?;
+    let check_js = format!(
+        r#"(() => {{
+            const want = {prefix_json};
+            // Posts are `[class*="post-item"]`; some are `post-item-body`
+            // sub-fragments — we just substring-match across all of them.
+            return Array.from(document.querySelectorAll('[class*="post-item"]'))
+                .some(el => (el.innerText || '').includes(want));
+        }})()"#
+    );
+    let deadline = Duration::from_secs(45);
+    let start = Instant::now();
+    loop {
+        let landed = page
+            .evaluate(&check_js)
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if landed {
+            tracing::info!(chars = body.chars().count(), "toutiao: 微头条 confirmed on dashboard");
+            return Ok(());
+        }
+        if start.elapsed() > deadline {
+            anyhow::bail!(
+                "微头条: post not visible on dashboard within 45s — \
+                 likely silently dropped (anti-spam) or stuck in moderation"
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Split `content.text` into (title, body):

@@ -99,8 +99,11 @@ enum Command {
         /// Path to a video file (required for video platforms).
         #[arg(long)]
         video: Option<PathBuf>,
-        /// Title (first line of content body for YouTube).
-        #[arg(long)]
+        /// Title. Required for long-form posts (YouTube videos, WeChat
+        /// MP articles, Toutiao articles). Omit for short-form posts
+        /// (Toutiao 微头条, future tweets) — server then routes the
+        /// content to the platform's short-post editor.
+        #[arg(long, default_value = "")]
         title: String,
         /// Description / body.
         #[arg(long, default_value = "")]
@@ -646,10 +649,19 @@ async fn handle_post(
 
     // Compose the Content body — title + description join into one block,
     // YouTube publisher splits on the first newline.
-    let body = if description.is_empty() {
-        title.clone()
-    } else {
-        format!("{title}\n\n{description}")
+    // Compose the Content body. Three caller intents:
+    //   - title + description   → "TITLE\n\nBODY" (long-form: article/video)
+    //   - title only            → just the title (degenerate but legal)
+    //   - description only      → just the body (short-form: 微头条 / tweet)
+    // Server-side `infer_content_kind` looks at the resulting shape to pick
+    // the platform's article vs short-post editor.
+    let body = match (title.as_str(), description.as_str()) {
+        ("", "") => {
+            anyhow::bail!("at least one of --title or --description is required");
+        }
+        ("", desc) => desc.to_string(),
+        (t, "") => t.to_string(),
+        (t, desc) => format!("{t}\n\n{desc}"),
     };
     let content = Content {
         text: body,
