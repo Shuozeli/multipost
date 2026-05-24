@@ -11,6 +11,7 @@ members = [
     "crates/multipost-publishers/wx-gzh",
     "crates/multipost-publishers/douyin",
     "crates/multipost-publishers/toutiao",
+    "crates/multipost-publishers/twitter",
 ]
 
 [workspace.package]
@@ -79,6 +80,7 @@ multipost-publishers-youtube = { path = "crates/multipost-publishers/youtube" }
 multipost-publishers-wx-gzh = { path = "crates/multipost-publishers/wx-gzh" }
 multipost-publishers-douyin = { path = "crates/multipost-publishers/douyin" }
 multipost-publishers-toutiao = { path = "crates/multipost-publishers/toutiao" }
+multipost-publishers-twitter = { path = "crates/multipost-publishers/twitter" }
 
 [profile.release]
 lto = "thin"

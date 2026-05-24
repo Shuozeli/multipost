@@ -16,6 +16,7 @@ use multipost_proto::accounts::{
 use multipost_proto::common::Platform as ProtoPlatform;
 use multipost_publishers_douyin::DouyinCredentials;
 use multipost_publishers_toutiao::ToutiaoCredentials;
+use multipost_publishers_twitter::TwitterCredentials;
 use multipost_publishers_wx_gzh::{check_account_info, ensure_access_token, WxGzhCredentials};
 use multipost_publishers_youtube::{exchange_code, start_oauth_url};
 use multipost_storage::accounts::AccountRecord;
@@ -512,12 +513,72 @@ impl Accounts for AccountsService {
                 tracing::info!(cdp = %creds.cdp_url, "toutiao account registered");
                 Ok(Response::new(record_to_proto(&record)))
             }
-            Platform::YouTube | Platform::Twitter => {
-                Err(Status::failed_precondition(format!(
-                    "{} uses OAuth or browser auth; use StartAuth/CompleteAuth instead",
-                    platform.as_str()
-                )))
+            Platform::Twitter => {
+                // Twitter / X — CDP + handle. Same shape as Toutiao /
+                // Douyin (browser-cookie auth, no token storage).
+                let creds: TwitterCredentials = serde_json::from_str(&r.credentials_json)
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "credentials_json must be {{cdp_url, handle, display_name?}}: {e}"
+                        ))
+                    })?;
+                if creds.cdp_url.is_empty() {
+                    return Err(Status::invalid_argument("cdp_url is required"));
+                }
+                if creds.handle.is_empty() {
+                    return Err(Status::invalid_argument("handle is required"));
+                }
+                let publisher = self
+                    .state
+                    .publishers
+                    .get(&Platform::Twitter)
+                    .cloned()
+                    .ok_or_else(|| Status::internal("twitter publisher not registered"))?;
+                let probe_creds = serde_json::to_value(&creds)
+                    .map_err(|e| Status::internal(format!("serialize twitter creds: {e}")))?;
+                let probe_ctx = multipost_core::PublishContext {
+                    account_id: Uuid::nil(),
+                    user_id: tenant_id,
+                    credentials: &probe_creds,
+                    media: vec![],
+                };
+                let auth = publisher.check_auth(&probe_ctx).await.map_err(|e| {
+                    Status::failed_precondition(format!("twitter check_auth: {e}"))
+                })?;
+                if !matches!(auth, AuthStatus::Active) {
+                    return Err(Status::failed_precondition(format!(
+                        "twitter profile at {} is not logged in (status={:?}). \
+                         Open x.com in that Chrome and finish the login flow.",
+                        creds.cdp_url, auth
+                    )));
+                }
+                let now = Utc::now();
+                let record = AccountRecord {
+                    id: Uuid::new_v4(),
+                    user_id: tenant_id,
+                    platform: Platform::Twitter,
+                    display_name: if creds.display_name.is_empty() {
+                        format!("@{}", creds.handle)
+                    } else {
+                        creds.display_name.clone()
+                    },
+                    external_id: creds.handle.clone(),
+                    auth_status: AuthStatus::Active,
+                    credentials: probe_creds,
+                    created_at: now,
+                    last_used_at: now,
+                };
+                self.state
+                    .accounts
+                    .upsert(record.clone())
+                    .await
+                    .map_err(|e| Status::internal(format!("persist account: {e}")))?;
+                tracing::info!(handle = %creds.handle, "twitter account registered");
+                Ok(Response::new(record_to_proto(&record)))
             }
+            Platform::YouTube => Err(Status::failed_precondition(
+                "youtube uses OAuth; use StartAuth/CompleteAuth instead",
+            )),
         }
     }
 }

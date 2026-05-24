@@ -20,6 +20,7 @@ use multipost_proto::media::media_server::MediaServer;
 use multipost_proto::posts::posts_server::PostsServer;
 use multipost_publishers_douyin::DouyinPublisher;
 use multipost_publishers_toutiao::ToutiaoPublisher;
+use multipost_publishers_twitter::TwitterPublisher;
 use multipost_publishers_wx_gzh::WxGzhPublisher;
 use multipost_publishers_youtube::{OAuthCredentials, YouTubePublisher};
 use multipost_storage::accounts::FileBackedAccountRepository;
@@ -150,6 +151,10 @@ async fn main() -> anyhow::Result<()> {
     // Toutiao: same per-account CDP shape as Douyin.
     publishers.insert(Platform::Toutiao, Arc::new(ToutiaoPublisher::new()));
     info!("Toutiao publisher registered");
+
+    // Twitter / X: per-account CDP + handle.
+    publishers.insert(Platform::Twitter, Arc::new(TwitterPublisher::new()));
+    info!("Twitter publisher registered");
 
     let app_state = Arc::new(AppState::new(
         accounts,

@@ -20,6 +20,7 @@ multipost-publishers-youtube.workspace = true
 multipost-publishers-wx-gzh.workspace = true
 multipost-publishers-douyin.workspace = true
 multipost-publishers-toutiao.workspace = true
+multipost-publishers-twitter.workspace = true
 tonic.workspace = true
 prost.workspace = true
 prost-types.workspace = true

@@ -210,6 +210,20 @@ enum AccountsAction {
         #[arg(long, default_value = "")]
         toutiao_id: String,
     },
+    /// Register a Twitter / X account by the CDP endpoint of a Chrome
+    /// profile that's already logged into x.com.
+    RegisterTwitter {
+        /// Chrome DevTools Protocol HTTP endpoint.
+        #[arg(long)]
+        cdp_url: String,
+        /// Twitter handle without the leading `@` (e.g. `multipost_dev`).
+        /// Needed so delete() can navigate to /<handle> to find tweets.
+        #[arg(long)]
+        handle: String,
+        /// Optional cached display name.
+        #[arg(long, default_value = "")]
+        display_name: String,
+    },
 }
 
 fn parse_platform(s: &str) -> anyhow::Result<ProtoPlatform> {
@@ -539,6 +553,32 @@ async fn handle_accounts(
             println!("  display_name: {}", resp.display_name);
             if !resp.external_id.is_empty() {
                 println!("  toutiao_id:   {}", resp.external_id);
+            }
+        }
+        AccountsAction::RegisterTwitter {
+            cdp_url,
+            handle,
+            display_name,
+        } => {
+            let creds = serde_json::json!({
+                "cdp_url": cdp_url,
+                "handle": handle,
+                "display_name": display_name,
+            })
+            .to_string();
+            let resp = client
+                .register_developer_credentials(RegisterDeveloperRequest {
+                    platform: ProtoPlatform::Twitter as i32,
+                    credentials_json: creds,
+                })
+                .await
+                .context("Accounts.RegisterDeveloperCredentials rpc")?
+                .into_inner();
+            println!("✓ Twitter account registered");
+            println!("  id:           {}", resp.id);
+            println!("  display_name: {}", resp.display_name);
+            if !resp.external_id.is_empty() {
+                println!("  handle:       @{}", resp.external_id);
             }
         }
     }

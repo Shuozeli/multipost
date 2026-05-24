@@ -1324,6 +1324,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "multipost-publishers-twitter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "multipost-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "multipost-publishers-wx-gzh"
 version = "0.1.0"
 dependencies = [
@@ -1373,6 +1393,7 @@ dependencies = [
  "multipost-proto",
  "multipost-publishers-douyin",
  "multipost-publishers-toutiao",
+ "multipost-publishers-twitter",
  "multipost-publishers-wx-gzh",
  "multipost-publishers-youtube",
  "multipost-storage",
