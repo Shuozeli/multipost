@@ -499,6 +499,10 @@ async fn publish_article(
         .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
 
     run_publish_flow(&mut page, &title, &body).await?;
+    // Success: close the editor tab so it doesn't accumulate on the
+    // Chrome host across many publishes. (Failure path leaves it open
+    // for debugging — same pattern as our other publishers.)
+    let _ = session.close_tab(&tab.id).await;
     Ok(PublishHandle {
         external_id: title.to_string(),
         permalink: None,
@@ -544,6 +548,8 @@ async fn publish_weitoutiao(
         .await
         .map_err(|e| PublishError::Transient(format!("toutiao weitoutiao: {e}")))?;
 
+    // Success: close the editor + dashboard-check tab.
+    let _ = session.close_tab(&tab.id).await;
     let external_id: String = body.chars().take(30).collect();
     Ok(PublishHandle {
         external_id,

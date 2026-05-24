@@ -447,6 +447,12 @@ async fn drive_upload(
         .map_err(|e| PublishError::Transient(format!("douyin open_page: {e}")))?;
 
     let result = run_upload_flow(&mut page, staged, title, description, visibility).await;
+    // On success, close the upload tab so it doesn't accumulate on the
+    // Chrome host across many publishes. On failure, leave it open so
+    // the user can inspect what state Douyin left the form in.
+    if result.is_ok() {
+        let _ = session.close_tab(&tab.id).await;
+    }
     // Douyin doesn't surface a stable aweme_id in either the post-publish URL
     // or the manage row DOM — confirm/delete match the work by title instead.
     // Store the title as external_id so the orchestrator can pass it back.

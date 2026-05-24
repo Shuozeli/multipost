@@ -170,6 +170,11 @@ impl Publisher for TwitterPublisher {
             .await
             .map_err(|e| PublishError::Transient(format!("twitter publish: {e}")))?;
 
+        // Success: close the compose tab so it doesn't accumulate on
+        // the Chrome host across many publishes. (Failure path leaves
+        // it open for debugging.)
+        let _ = session.close_tab(&tab.id).await;
+
         // External ID = first 30 chars of body, same prefix-match
         // convention used by Toutiao / Douyin / 微头条 delete.
         let external_id: String = body.chars().take(30).collect();
