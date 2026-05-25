@@ -18,6 +18,10 @@ use multipost_proto::accounts::{
     RegisterDeveloperRequest, StartAuthRequest,
 };
 use multipost_proto::common::{Platform as ProtoPlatform, Visibility};
+use multipost_proto::crawl::crawl_client::CrawlClient;
+use multipost_proto::crawl::{
+    CrawlJobState as ProtoCrawlJobState, GetCrawlJobRequest, ListItemsRequest, SubmitCrawlRequest,
+};
 use multipost_proto::media::media_client::MediaClient;
 use multipost_proto::media::{upload_chunk, UploadChunk, UploadMeta};
 use multipost_proto::posts::posts_client::PostsClient;
@@ -90,6 +94,28 @@ enum Command {
         /// Long-poll timeout, in seconds. 0 = return immediately.
         #[arg(long, default_value = "0")]
         wait: i32,
+    },
+    /// Crawl a platform's recommendation feed and capture popular
+    /// content + engagement metrics. Submits + long-polls. Results are
+    /// also persisted to `~/.multipost/discovered.sqlite` on the server.
+    Crawl {
+        /// Platform to crawl: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// How long the crawler should listen + scroll, in seconds.
+        /// Server clamps to [5, 300].
+        #[arg(long, default_value = "30")]
+        duration: u32,
+    },
+    /// List recently captured items for a platform from the server's
+    /// SQLite store (across all crawl jobs).
+    Discovered {
+        /// Platform: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// Max items.
+        #[arg(long, default_value = "30")]
+        limit: u32,
     },
     /// Submit content for publishing.
     Post {
@@ -272,6 +298,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Cancel { job_id } => handle_cancel(&cli.server, auth, job_id).await,
         Command::Watch { job_id } => handle_watch(&cli.server, auth, job_id).await,
         Command::GetJob { job_id, wait } => handle_get_job(&cli.server, auth, job_id, wait).await,
+        Command::Crawl { platform, duration } => {
+            handle_crawl(&cli.server, auth, platform, duration).await
+        }
+        Command::Discovered { platform, limit } => {
+            handle_discovered(&cli.server, auth, platform, limit).await
+        }
         Command::Post {
             to,
             video,
@@ -312,6 +344,7 @@ impl Interceptor for AuthInterceptor {
 type AccountsCli = AccountsClient<InterceptedService<Channel, AuthInterceptor>>;
 type MediaCli = MediaClient<InterceptedService<Channel, AuthInterceptor>>;
 type PostsCli = PostsClient<InterceptedService<Channel, AuthInterceptor>>;
+type CrawlCli = CrawlClient<InterceptedService<Channel, AuthInterceptor>>;
 
 async fn build_accounts(server: &str, auth: AuthInterceptor) -> anyhow::Result<AccountsCli> {
     let channel = Channel::from_shared(server.to_string())?
@@ -335,6 +368,90 @@ async fn build_posts(server: &str, auth: AuthInterceptor) -> anyhow::Result<Post
         .await
         .with_context(|| format!("connecting to {server}"))?;
     Ok(PostsClient::with_interceptor(channel, auth))
+}
+
+async fn build_crawl(server: &str, auth: AuthInterceptor) -> anyhow::Result<CrawlCli> {
+    let channel = Channel::from_shared(server.to_string())?
+        .connect()
+        .await
+        .with_context(|| format!("connecting to {server}"))?;
+    Ok(CrawlClient::with_interceptor(channel, auth))
+}
+
+async fn handle_crawl(
+    server: &str,
+    auth: AuthInterceptor,
+    platform: String,
+    duration: u32,
+) -> anyhow::Result<()> {
+    let mut client = build_crawl(server, auth).await?;
+    let submitted = client
+        .submit(SubmitCrawlRequest {
+            platform: platform.clone(),
+            duration_secs: duration,
+        })
+        .await?
+        .into_inner();
+    println!("submitted crawl job {} ({}, {}s)", submitted.id, submitted.platform, submitted.duration_secs);
+    println!("waiting up to {}s for completion ...", duration + 30);
+
+    // Long-poll until terminal.
+    let final_job = client
+        .get_job(GetCrawlJobRequest {
+            id: submitted.id.clone(),
+            wait_seconds: duration + 30,
+        })
+        .await?
+        .into_inner();
+
+    let state = ProtoCrawlJobState::try_from(final_job.state)
+        .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
+    println!("state: {:?}   items: {}", state, final_job.items_captured);
+    if !final_job.last_error.is_empty() {
+        println!("error: {}", final_job.last_error);
+        return Ok(());
+    }
+    print_items(&final_job.items);
+    Ok(())
+}
+
+async fn handle_discovered(
+    server: &str,
+    auth: AuthInterceptor,
+    platform: String,
+    limit: u32,
+) -> anyhow::Result<()> {
+    let mut client = build_crawl(server, auth).await?;
+    let resp = client
+        .list_items(ListItemsRequest { platform, limit })
+        .await?
+        .into_inner();
+    print_items(&resp.items);
+    Ok(())
+}
+
+fn print_items(items: &[multipost_proto::crawl::DiscoveredItem]) {
+    if items.is_empty() {
+        println!("(no items)");
+        return;
+    }
+    for (i, it) in items.iter().enumerate() {
+        let m = it.metrics.clone().unwrap_or_default();
+        let text: String = it.body.chars().take(60).collect::<String>().replace('\n', " ");
+        let handle: String = it.author_handle.chars().take(16).collect();
+        println!(
+            "  [{:>3}] {:<16} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
+            i + 1,
+            handle,
+            m.read_count,
+            m.like_count,
+            m.comment_count,
+            m.share_count,
+            m.bookmark_count,
+            m.view_count,
+            text
+        );
+    }
 }
 
 fn expand_path(p: &str) -> PathBuf {

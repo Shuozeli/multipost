@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use multipost_core::{Platform, Publisher};
+use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher};
 use multipost_orchestrator::JobState;
+use multipost_proto::crawl::CrawlJobState as ProtoCrawlJobState;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use multipost_publishers_youtube::OAuthCredentials;
 use multipost_storage::accounts::AccountRepository;
+use multipost_storage::discovered::DiscoveredRepository;
 use multipost_storage::jobs::JobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
 use uuid::Uuid;
@@ -55,6 +57,22 @@ pub struct JobEventInternal {
 /// their stream with ResourceExhausted.
 pub const JOB_EVENT_BUS_CAPACITY: usize = 256;
 
+/// In-memory snapshot of a crawl job. The Crawl service mutates this
+/// from the background worker and emits a copy on every transition via
+/// [`AppState::emit_crawl_event`].
+#[derive(Debug, Clone)]
+pub struct CrawlJobInternal {
+    pub id: Uuid,
+    pub platform: Platform,
+    pub state: ProtoCrawlJobState,
+    pub duration_secs: u32,
+    pub items_captured: u32,
+    pub items: Vec<DiscoveredItem>,
+    pub last_error: Option<String>,
+    pub submitted_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
 /// Application state shared across request handlers.
 pub struct AppState {
     pub accounts: Arc<dyn AccountRepository>,
@@ -73,10 +91,19 @@ pub struct AppState {
     /// subscribe via `events.subscribe()`. Senders just call `events.send(_)`;
     /// when there are zero subscribers the message is dropped silently.
     pub events: broadcast::Sender<JobEventInternal>,
+    /// Crawler registry keyed by platform.
+    pub crawlers: HashMap<Platform, Arc<dyn Crawler>>,
+    /// SQLite-backed store for items captured by crawl jobs.
+    pub discovered: Arc<dyn DiscoveredRepository>,
+    /// In-flight + finished crawl jobs.
+    pub crawl_jobs: Mutex<HashMap<Uuid, CrawlJobInternal>>,
+    /// Broadcast bus for crawl-job state transitions (mirrors `events`).
+    pub crawl_events: broadcast::Sender<CrawlJobInternal>,
 }
 
 impl AppState {
     /// Construct shared state.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         accounts: Arc<dyn AccountRepository>,
         media: Arc<FileBackedMediaRepository>,
@@ -84,6 +111,8 @@ impl AppState {
         jobs: Arc<dyn JobRepository>,
         publishers: HashMap<Platform, Arc<dyn Publisher>>,
         oauth: OAuthConfig,
+        crawlers: HashMap<Platform, Arc<dyn Crawler>>,
+        discovered: Arc<dyn DiscoveredRepository>,
     ) -> Self {
         Self {
             accounts,
@@ -96,7 +125,18 @@ impl AppState {
             pending: Mutex::new(HashMap::new()),
             confirm_tasks: Mutex::new(HashMap::new()),
             events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
+            crawlers,
+            discovered,
+            crawl_jobs: Mutex::new(HashMap::new()),
+            crawl_events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
         }
+    }
+
+    /// Publish a crawl-job state event to the bus. Same semantics as
+    /// `emit_event` for the post-job bus — no-op when there are zero
+    /// subscribers.
+    pub fn emit_crawl_event(&self, ev: CrawlJobInternal) {
+        let _ = self.crawl_events.send(ev);
     }
 
     /// Publish a job-state event to the bus. No-op if there are zero

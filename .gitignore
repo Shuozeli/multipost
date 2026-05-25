@@ -24,6 +24,13 @@ bootstrap.token
 scripts/wechat-mp/artifacts.json
 scripts/wechat-mp/token_cache.json
 scripts/*/.pwright/
+# pwright state file lives in the cwd it was last run from — when devs
+# run the crawler smoke examples from the workspace root, it lands here.
+/.pwright/
+# Local SQLite is written under ~/.multipost/ by default, but if someone
+# overrides MULTIPOST_DATA_DIR to be inside the repo, keep the db out of
+# git too.
+discovered.sqlite
 scripts/*/screenshots/
 scripts/youtube/downloads/
 scripts/*/__pycache__/

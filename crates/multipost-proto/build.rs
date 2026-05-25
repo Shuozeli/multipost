@@ -6,6 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/accounts.proto",
                 "proto/posts.proto",
                 "proto/media.proto",
+                "proto/crawl.proto",
             ],
             &["proto"],
         )?;

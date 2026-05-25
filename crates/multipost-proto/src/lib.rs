@@ -21,3 +21,8 @@ pub mod posts {
 pub mod media {
     tonic::include_proto!("media");
 }
+
+/// Content-discovery (crawler) service.
+pub mod crawl {
+    tonic::include_proto!("crawl");
+}
