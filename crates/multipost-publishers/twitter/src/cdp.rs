@@ -315,4 +315,29 @@ impl PageSession {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         Ok(())
     }
+
+    /// Bring this page's tab to the foreground (`Page.bringToFront`).
+    ///
+    /// Tabs created via `PUT /json/new` open in the background, and Chrome
+    /// does not run hit-testing for a hidden tab — so real CDP mouse events
+    /// (`Input.dispatchMouseEvent`) land on nothing and clicks silently
+    /// no-op. Foregrounding the tab makes `real_click` actually hit the
+    /// element (and is what a human's compose tab looks like anyway).
+    pub async fn bring_to_front(&mut self) -> Result<()> {
+        self.send("Page.bringToFront", json!({})).await?;
+        Ok(())
+    }
+
+    /// Insert `text` at the current caret via CDP `Input.insertText`.
+    ///
+    /// Unlike `Runtime.evaluate("execCommand('insertText', ...)")`, this
+    /// dispatches a genuine `beforeinput`/`input` event down the same path
+    /// an IME commit takes: the event is `isTrusted` and frameworks like
+    /// Draft.js / Lexical honor it. A bulk `execCommand` fill is both
+    /// untrusted and instantaneous — a textbook automation tell. Callers
+    /// drive this one grapheme at a time with jitter for human cadence.
+    pub async fn insert_text(&mut self, text: &str) -> Result<()> {
+        self.send("Input.insertText", json!({ "text": text })).await?;
+        Ok(())
+    }
 }

@@ -1,9 +1,11 @@
 //! DOM selectors / text matchers for x.com.
 //!
 //! Mapped from `scripts/twitter/03_compose_post.py`. Twitter's composer
-//! is a Lexical/Draft-style contenteditable that listens for InputEvent;
-//! `execCommand('insertText')` is the only fill that triggers Draft's
-//! state updates so the Post button enables.
+//! is a Lexical/Draft-style contenteditable that listens for InputEvent.
+//! The publisher fills it with per-keystroke CDP `Input.insertText` (a
+//! trusted beforeinput/input path Draft honors); the older untrusted
+//! `execCommand('insertText')` bulk fill was an automation tell and is no
+//! longer used.
 
 /// Compose landing page. We use the inline composer on /home rather
 /// than /compose/post — the latter opens a MODAL on top of the

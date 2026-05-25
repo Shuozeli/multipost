@@ -586,17 +586,37 @@ async fn run_weitoutiao_flow(page: &mut PageSession, body: &str) -> anyhow::Resu
     }
     tracing::info!("toutiao: 微头条 editor mounted");
 
-    // Focus + chunked execCommand insertText (same trick as articles).
-    let focus_js = r#"(() => {
+    // Focus, then CLEAR any restored draft BEFORE typing. Toutiao 微头条
+    // auto-saves drafts and restores them when the editor mounts; without an
+    // explicit clear, execCommand('insertText') APPENDS the new body to the
+    // leftover draft and two separate posts publish as ONE concatenated
+    // 微头条 (observed 2026-05-24: 快递618 + 山西煤矿 merged). selectAll +
+    // delete goes through the beforeinput path ProseMirror honors.
+    let clear_js = r#"(() => {
         const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
         if (!ed) return {ok: false};
         ed.focus();
-        return {ok: true};
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        return {ok: true, len: (ed.innerText || '').replace(/\s+/g, '').length};
     })()"#;
-    let r = page.evaluate(focus_js).await?;
-    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        anyhow::bail!("focus 微头条 editor failed");
+    let mut cleared = false;
+    for _ in 0..3 {
+        let r = page.evaluate(clear_js).await?;
+        if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!("focus/clear 微头条 editor failed");
+        }
+        if r.get("len").and_then(|v| v.as_u64()).unwrap_or(1) == 0 {
+            cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
+    if !cleared {
+        tracing::warn!("toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover");
+    }
+
+    // Chunked execCommand insertText (same trick as articles).
     for chunk in body.chars().collect::<Vec<_>>().chunks(800) {
         let piece: String = chunk.iter().collect();
         let val = serde_json::to_string(&piece)?;
@@ -607,6 +627,30 @@ async fn run_weitoutiao_flow(page: &mut PageSession, body: &str) -> anyhow::Resu
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     tracing::info!(chars = body.chars().count(), "toutiao: 微头条 body filled");
+
+    // Concatenation guard (fail-closed): the editor must hold ONLY our body.
+    // If it is materially longer, a leftover draft survived the clear and we
+    // would publish a merged post — bail instead of posting garbage.
+    let body_nows = body.chars().filter(|c| !c.is_whitespace()).count();
+    let editor_len = page
+        .evaluate(
+            r#"(() => {
+                const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
+                return ed ? (ed.innerText || '').replace(/\s+/g, '').length : -1;
+            })()"#,
+        )
+        .await?
+        .as_i64()
+        .unwrap_or(-1);
+    if editor_len < 0 {
+        anyhow::bail!("微头条 editor vanished before publish");
+    }
+    if editor_len as usize > body_nows + 5 {
+        anyhow::bail!(
+            "微头条 editor has {editor_len} non-space chars but body has {body_nows} — \
+             leftover draft detected (concatenation guard); refusing to publish a merged post"
+        );
+    }
 
     // Click 发布. Wait briefly for the button to become enabled after the
     // editor commits the inserted text.

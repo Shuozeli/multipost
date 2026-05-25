@@ -12,6 +12,7 @@ multipost-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+rand.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
