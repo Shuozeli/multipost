@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package crawl;
+
+import "common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Content-discovery service. Read-only counterpart to Posts: instead of
+// publishing, callers ask the server to drive a browser to a platform's
+// recommendation feed and capture popular content + engagement metrics.
+service Crawl {
+  // Submit a crawl job. Returns immediately with a job ID; the actual
+  // crawl runs in the background. Poll GetJob (optionally with
+  // wait_seconds for long-polling) until state == COMPLETED.
+  rpc Submit(SubmitCrawlRequest) returns (CrawlJob);
+
+  // Get the current state of a crawl job. When wait_seconds > 0 AND
+  // the job is non-terminal, the server blocks for up to wait_seconds
+  // waiting for the next state transition. Returns the items captured
+  // so far on each call (final list on terminal states).
+  rpc GetJob(GetCrawlJobRequest) returns (CrawlJob);
+
+  // List recently-captured items for a platform (across crawl jobs).
+  rpc ListItems(ListItemsRequest) returns (ListItemsResponse);
+}
+
+message SubmitCrawlRequest {
+  // Platform string: "toutiao" | "twitter" | ...
+  string platform = 1;
+  // How long the crawler should listen + scroll, in seconds.
+  // Server clamps to [5, 300].
+  uint32 duration_secs = 2;
+}
+
+message GetCrawlJobRequest {
+  string id = 1;
+  // 0 = return immediately. > 0 = block up to wait_seconds for the
+  // next state transition. Server caps at 300.
+  uint32 wait_seconds = 2;
+}
+
+message ListItemsRequest {
+  // Platform to query. Required.
+  string platform = 1;
+  // Max items to return. Server caps at 200.
+  uint32 limit = 2;
+}
+
+message ListItemsResponse {
+  repeated DiscoveredItem items = 1;
+}
+
+enum CrawlJobState {
+  CRAWL_STATE_UNSPECIFIED = 0;
+  CRAWL_STATE_PENDING = 1;
+  CRAWL_STATE_RUNNING = 2;
+  CRAWL_STATE_COMPLETED = 3;
+  CRAWL_STATE_FAILED = 4;
+}
+
+message CrawlJob {
+  string id = 1;
+  string platform = 2;
+  CrawlJobState state = 3;
+  uint32 duration_secs = 4;
+  // Number of items captured so far. Final on terminal states.
+  uint32 items_captured = 5;
+  // Items captured by this job. Populated only when state ==
+  // CRAWL_STATE_COMPLETED. For partial reads, use ListItems.
+  repeated DiscoveredItem items = 6;
+  string last_error = 7;
+  google.protobuf.Timestamp submitted_at = 8;
+  google.protobuf.Timestamp finished_at = 9;
+}
+
+// Normalized item captured from a platform's feed.
+message DiscoveredItem {
+  string platform = 1;
+  string item_id = 2;
+  google.protobuf.Timestamp captured_at = 3;
+  string author_handle = 4;
+  string author_name = 5;
+  string body = 6;
+  string url = 7;
+  DiscoveryMetrics metrics = 8;
+  // Platform-specific extras, JSON-encoded.
+  string metadata_json = 9;
+}
+
+// Engagement metrics. Missing fields are represented as -1 over the
+// wire (proto3 int64 doesn't have a "null" — the server treats -1 as
+// "platform didn't report this metric").
+message DiscoveryMetrics {
+  int64 read_count = 1;
+  int64 like_count = 2;
+  int64 comment_count = 3;
+  int64 share_count = 4;
+  int64 view_count = 5;
+  int64 bookmark_count = 6;
+}

@@ -12,6 +12,8 @@ members = [
     "crates/multipost-publishers/douyin",
     "crates/multipost-publishers/toutiao",
     "crates/multipost-publishers/twitter",
+    "crates/multipost-crawlers/toutiao",
+    "crates/multipost-crawlers/twitter",
 ]
 
 [workspace.package]
@@ -44,6 +46,7 @@ toml = "0.8"
 
 # DB
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+rusqlite = { version = "0.32", features = ["bundled", "serde_json", "chrono"] }
 
 # Errors
 thiserror = "1"
@@ -81,6 +84,8 @@ multipost-publishers-wx-gzh = { path = "crates/multipost-publishers/wx-gzh" }
 multipost-publishers-douyin = { path = "crates/multipost-publishers/douyin" }
 multipost-publishers-toutiao = { path = "crates/multipost-publishers/toutiao" }
 multipost-publishers-twitter = { path = "crates/multipost-publishers/twitter" }
+multipost-crawlers-toutiao = { path = "crates/multipost-crawlers/toutiao" }
+multipost-crawlers-twitter = { path = "crates/multipost-crawlers/twitter" }
 
 [profile.release]
 lto = "thin"

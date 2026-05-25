@@ -15,7 +15,10 @@ use tonic::transport::Server;
 use tracing::{info, Level};
 
 use multipost_core::Platform;
+use multipost_crawlers_toutiao::ToutiaoCrawler;
+use multipost_crawlers_twitter::TwitterCrawler;
 use multipost_proto::accounts::accounts_server::AccountsServer;
+use multipost_proto::crawl::crawl_server::CrawlServer;
 use multipost_proto::media::media_server::MediaServer;
 use multipost_proto::posts::posts_server::PostsServer;
 use multipost_publishers_douyin::DouyinPublisher;
@@ -24,12 +27,14 @@ use multipost_publishers_twitter::TwitterPublisher;
 use multipost_publishers_wx_gzh::WxGzhPublisher;
 use multipost_publishers_youtube::{OAuthCredentials, YouTubePublisher};
 use multipost_storage::accounts::FileBackedAccountRepository;
+use multipost_storage::discovered::SqliteDiscoveredRepository;
 use multipost_storage::jobs::FileBackedJobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
 use multipost_storage::tenants::FileBackedTenantRepository;
 
 use crate::auth::AuthInterceptor;
 use crate::services::accounts::AccountsService;
+use crate::services::crawl::CrawlService;
 use crate::services::media::MediaService;
 use crate::services::posts::PostsService;
 use crate::state::{AppState, OAuthConfig};
@@ -156,6 +161,18 @@ async fn main() -> anyhow::Result<()> {
     publishers.insert(Platform::Twitter, Arc::new(TwitterPublisher::new()));
     info!("Twitter publisher registered");
 
+    // Crawlers (read-only; drive pwright via subprocess).
+    let mut crawlers: HashMap<Platform, Arc<dyn multipost_core::Crawler>> = HashMap::new();
+    crawlers.insert(Platform::Toutiao, Arc::new(ToutiaoCrawler::new()));
+    info!("Toutiao crawler registered");
+    crawlers.insert(Platform::Twitter, Arc::new(TwitterCrawler::new()));
+    info!("Twitter crawler registered");
+
+    let discovered = Arc::new(
+        SqliteDiscoveredRepository::open(data_dir.join("discovered.sqlite"))
+            .context("open discovered.sqlite")?,
+    );
+
     let app_state = Arc::new(AppState::new(
         accounts,
         media.clone(),
@@ -163,11 +180,14 @@ async fn main() -> anyhow::Result<()> {
         jobs,
         publishers,
         oauth,
+        crawlers,
+        discovered,
     ));
 
     let accounts_svc = AccountsService::new(app_state.clone());
     let media_svc = MediaService::new(app_state.clone());
     let posts_svc = PostsService::new(app_state.clone());
+    let crawl_svc = CrawlService::new(app_state.clone());
 
     // §22.7 startup recovery: re-attach confirm-poll tasks for any
     // Confirming jobs that survived a crash/restart in the last 24h.
@@ -194,7 +214,8 @@ async fn main() -> anyhow::Result<()> {
     Server::builder()
         .add_service(AccountsServer::with_interceptor(accounts_svc, interceptor.clone()))
         .add_service(MediaServer::with_interceptor(media_svc, interceptor.clone()))
-        .add_service(PostsServer::with_interceptor(posts_svc, interceptor))
+        .add_service(PostsServer::with_interceptor(posts_svc, interceptor.clone()))
+        .add_service(CrawlServer::with_interceptor(crawl_svc, interceptor))
         .serve_with_shutdown(args.grpc_addr, shutdown)
         .await
         .context("serve grpc")?;

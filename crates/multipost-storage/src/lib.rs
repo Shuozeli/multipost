@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod accounts;
+pub mod discovered;
 pub mod jobs;
 pub mod media;
 pub mod tenants;

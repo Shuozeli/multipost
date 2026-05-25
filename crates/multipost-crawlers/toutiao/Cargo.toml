@@ -1,25 +1,22 @@
 [package]
-name = "multipost-storage"
+name = "multipost-crawlers-toutiao"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Storage layer (Postgres + S3) for multipost."
+description = "Toutiao 推荐 feed crawler for multipost (drives pwright via subprocess)."
 
 [dependencies]
 multipost-core.workspace = true
+anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-sqlx.workspace = true
-rusqlite.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
