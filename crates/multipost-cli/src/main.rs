@@ -125,6 +125,12 @@ enum Command {
         /// Path to a video file (required for video platforms).
         #[arg(long)]
         video: Option<PathBuf>,
+        /// Path to an image to attach. Repeatable:
+        /// `--image a.png --image b.jpg`. Routes to the platform's
+        /// image-post flow (Twitter tweet with photos, Toutiao 微头条
+        /// with images). Mutually exclusive with --video.
+        #[arg(long)]
+        image: Vec<PathBuf>,
         /// Title. Required for long-form posts (YouTube videos, WeChat
         /// MP articles, Toutiao articles). Omit for short-form posts
         /// (Toutiao 微头条, future tweets) — server then routes the
@@ -307,11 +313,17 @@ async fn main() -> anyhow::Result<()> {
         Command::Post {
             to,
             video,
+            image,
             title,
             description,
             tags,
             privacy,
-        } => handle_post(&cli.server, auth, to, video, title, description, tags, privacy).await,
+        } => {
+            handle_post(
+                &cli.server, auth, to, video, image, title, description, tags, privacy,
+            )
+            .await
+        }
     }
 }
 
@@ -702,11 +714,65 @@ async fn handle_accounts(
     Ok(())
 }
 
+/// Upload one media file via streaming `Media.Upload` and return its
+/// server-assigned media_id. Shared by the `--video` and `--image` paths.
+async fn upload_media(
+    server: &str,
+    auth: AuthInterceptor,
+    path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read {path:?}"))?;
+    let mime = mime_for(path).to_string();
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload.bin")
+        .to_string();
+    let total = bytes.len() as i64;
+    println!("Uploading {total} bytes ({mime}) as {filename} ...");
+
+    let mut media_client = build_media(server, auth).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<UploadChunk>(8);
+
+    // Send the meta chunk + data chunks from a side task.
+    let send_task = tokio::spawn(async move {
+        tx.send(UploadChunk {
+            payload: Some(upload_chunk::Payload::Meta(UploadMeta {
+                filename,
+                mime_type: mime,
+                total_bytes: total,
+            })),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("send meta: {e}"))?;
+        for chunk in bytes.chunks(UPLOAD_CHUNK) {
+            tx.send(UploadChunk {
+                payload: Some(upload_chunk::Payload::Data(chunk.to_vec())),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("send data: {e}"))?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let resp = media_client
+        .upload(ReceiverStream::new(rx))
+        .await
+        .context("Media.Upload rpc")?;
+    send_task.await??;
+    let asset = resp.into_inner();
+    println!("  ✓ media_id: {}", asset.id);
+    Ok(asset.id)
+}
+
 async fn handle_post(
     server: &str,
     auth: AuthInterceptor,
     to: Vec<String>,
     video: Option<PathBuf>,
+    images: Vec<PathBuf>,
     title: String,
     description: String,
     tags: Vec<String>,
@@ -714,6 +780,9 @@ async fn handle_post(
 ) -> anyhow::Result<()> {
     if to.is_empty() {
         anyhow::bail!("--to is required");
+    }
+    if video.is_some() && !images.is_empty() {
+        anyhow::bail!("--video and --image are mutually exclusive");
     }
     let target_platforms: Vec<ProtoPlatform> = to
         .iter()
@@ -750,58 +819,15 @@ async fn handle_post(
         account_ids.push(matching[0].id.clone());
     }
 
-    // Upload media if --video was provided.
+    // Upload media. --video and --image are mutually exclusive (guarded
+    // above); images upload in order so the platform attaches them in the
+    // same order the user listed them.
     let mut media_ids: Vec<String> = Vec::new();
-    if let Some(path) = video {
-        let bytes = tokio::fs::read(&path)
-            .await
-            .with_context(|| format!("read {path:?}"))?;
-        let mime = mime_for(&path).to_string();
-        let filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("upload.bin")
-            .to_string();
-        let total = bytes.len() as i64;
-        println!(
-            "Uploading {} bytes ({}) as {} ...",
-            total,
-            mime,
-            filename
-        );
-
-        let mut media_client = build_media(server, auth.clone()).await?;
-        let (tx, rx) = tokio::sync::mpsc::channel::<UploadChunk>(8);
-
-        // Send first chunk (meta) + data chunks in a side task.
-        let send_task = tokio::spawn(async move {
-            tx.send(UploadChunk {
-                payload: Some(upload_chunk::Payload::Meta(UploadMeta {
-                    filename,
-                    mime_type: mime,
-                    total_bytes: total,
-                })),
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("send meta: {e}"))?;
-            for chunk in bytes.chunks(UPLOAD_CHUNK) {
-                tx.send(UploadChunk {
-                    payload: Some(upload_chunk::Payload::Data(chunk.to_vec())),
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("send data: {e}"))?;
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-
-        let resp = media_client
-            .upload(ReceiverStream::new(rx))
-            .await
-            .context("Media.Upload rpc")?;
-        send_task.await??;
-        let asset = resp.into_inner();
-        println!("  ✓ media_id: {}", asset.id);
-        media_ids.push(asset.id);
+    if let Some(path) = &video {
+        media_ids.push(upload_media(server, auth.clone(), path).await?);
+    }
+    for path in &images {
+        media_ids.push(upload_media(server, auth.clone(), path).await?);
     }
 
     // Compose the Content body — title + description join into one block,

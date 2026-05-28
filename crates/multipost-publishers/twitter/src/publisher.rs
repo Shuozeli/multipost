@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use multipost_core::{
-    AuthStatus, Capabilities, ConfirmStatus, Content, ContentKind, Platform,
+    AuthStatus, Capabilities, ConfirmStatus, Content, ContentKind, MediaPayload, Platform,
     PublishContext, PublishError, PublishHandle, Publisher, Result,
 };
 use rand::Rng;
@@ -90,7 +90,7 @@ impl Publisher for TwitterPublisher {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             max_text_chars: Some(selectors::MAX_TWEET_CHARS),
-            max_images: Some(4), // Twitter accepts up to 4 images; we don't use yet
+            max_images: Some(selectors::MAX_TWEET_IMAGES),
             video_supported: false, // would need a separate flow
             video_max_seconds: None,
             schedule_supported: false,
@@ -133,25 +133,8 @@ impl Publisher for TwitterPublisher {
         ctx: &mut PublishContext<'_>,
         content: &Content,
     ) -> Result<PublishHandle> {
-        // Twitter is text-only short-form — articles don't fit.
-        if matches!(content.kind, ContentKind::Article) {
-            return Err(PublishError::Rejected(
-                "twitter: long-form Article content doesn't fit Twitter; \
-                 submit without --title for a tweet"
-                    .into(),
-            ));
-        }
         let body = content.text.trim().to_string();
-        if body.is_empty() {
-            return Err(PublishError::Rejected("twitter: empty body".into()));
-        }
-        if body.chars().count() > selectors::MAX_TWEET_CHARS {
-            return Err(PublishError::Rejected(format!(
-                "twitter: body is {} chars; cap is {}",
-                body.chars().count(),
-                selectors::MAX_TWEET_CHARS,
-            )));
-        }
+        validate_tweet(content.kind, &body, &ctx.media)?;
 
         let creds = parse_credentials(ctx.credentials)?;
         let session = BrowserSession::connect(&creds.cdp_url)
@@ -167,7 +150,7 @@ impl Publisher for TwitterPublisher {
             .await
             .map_err(|e| PublishError::Transient(format!("twitter open_page: {e}")))?;
 
-        run_publish_flow(&mut page, &body)
+        run_publish_flow(&mut page, &body, &ctx.media)
             .await
             .map_err(|e| PublishError::Transient(format!("twitter publish: {e}")))?;
 
@@ -270,7 +253,11 @@ async fn type_humanlike(page: &mut PageSession, body: &str) -> anyhow::Result<()
 /// character with human cadence (trusted input events), pause, then
 /// real-mouse-click Post. Verify the composer cleared (success) and
 /// distinguish Twitter's automation-block toast from a generic failure.
-async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<()> {
+async fn run_publish_flow(
+    page: &mut PageSession,
+    body: &str,
+    media: &[MediaPayload],
+) -> anyhow::Result<()> {
     // Wait for the inline composer to mount. Twitter's React shell
     // takes 2-5s on a warm Chrome, longer on cold.
     let deadline = Duration::from_secs(45);
@@ -330,6 +317,38 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
     // Type the body one scalar at a time with human cadence.
     type_humanlike(page, body).await?;
     tracing::info!(chars = body.chars().count(), "twitter: body typed (humanlike)");
+
+    // Attach images, if any. The composer toolbar — including the hidden
+    // media `<input type=file>` — is mounted now that we've focused +
+    // typed; stream the bytes in over CDP (the Chrome is remote) and wait
+    // for Twitter's upload round-trip before clicking Post (clicking early
+    // drops the media). Empty-body image-only tweets skip typing above but
+    // the real-mouse focus still expanded the composer.
+    if !media.is_empty() {
+        let start = Instant::now();
+        loop {
+            let present = page
+                .evaluate(r#"!!document.querySelector('[data-testid="fileInput"]')"#)
+                .await?
+                .as_bool()
+                .unwrap_or(false);
+            if present {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(15) {
+                anyhow::bail!("twitter: media file input never mounted (composer not expanded?)");
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let files: Vec<(&str, &str, &[u8])> = media
+            .iter()
+            .map(|m| (m.filename.as_str(), m.mime_type.as_str(), m.bytes.as_slice()))
+            .collect();
+        page.upload_files_to_input(selectors::FILE_INPUT, &files)
+            .await?;
+        tracing::info!(n = media.len(), "twitter: images set on file input");
+        wait_for_media_attached(page, media.len()).await?;
+    }
 
     // Wait for the Post button to enable (Draft commits the input
     // asynchronously — we poll briefly). The per-keystroke Input.insertText
@@ -395,7 +414,7 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
     // Post button does not always register a CDP mouse click; tweets that
     // posted fine earlier used btn.click(). So we verify and, if the composer
     // hasn't cleared, fall back to a JS .click(). The fallback only fires
-    // while the composer STILL holds our text, so it cannot double-post.
+    // while the composer STILL holds our content, so it cannot double-post.
     match element_center(page, selectors::POST_BUTTON).await? {
         Some((x, y)) => page.real_click(x, y).await?,
         None => anyhow::bail!("twitter: Post button vanished before click"),
@@ -411,10 +430,11 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
         return { ok: true };
     })()"#;
 
-    // Verify the composer cleared (Twitter's success signal), watch for the
-    // automation-block toast, and fall back to a JS click if the real click
-    // didn't take.
-    let deadline = Duration::from_secs(25);
+    // Verify submission (Twitter's success signal: composer text gone AND
+    // any media attachments cleared), watch for the automation-block toast,
+    // and fall back to a JS click if the real click didn't take. 30s budget
+    // covers a media upload round-trip.
+    let deadline = Duration::from_secs(30);
     let start = Instant::now();
     let mut js_fallback_done = false;
     loop {
@@ -424,13 +444,16 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
                     const el = document.querySelector('[data-testid="tweetTextarea_0"]');
                     const state = !el ? 'gone'
                         : ((el.innerText || '').trim().length === 0 ? 'empty' : 'filled');
+                    const att = document.querySelector('[data-testid="attachments"]');
+                    const attEmpty = !att || att.querySelectorAll('img').length === 0;
                     const pageText = (document.body && document.body.innerText || '');
                     const blocked = /looks like it might be automated|can.t complete this action|something went wrong/i.test(pageText);
-                    return { state, blocked };
+                    return { state, attEmpty, blocked };
                 })()"#,
             )
             .await?;
         let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let att_empty = r.get("attEmpty").and_then(|v| v.as_bool()).unwrap_or(true);
         let blocked = r.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
         if blocked {
             anyhow::bail!(
@@ -438,14 +461,20 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
                  ('looks like it might be automated'); back off and retry later"
             );
         }
-        if state == "empty" || state == "gone" {
+        // Success = composer text gone AND any media attachments cleared.
+        // Image-only tweets start with empty text, so the attachments
+        // clearing is the real signal (text alone would false-positive).
+        let submitted = (state == "empty" || state == "gone") && att_empty;
+        if submitted {
             tracing::info!(state, fellback = js_fallback_done, "twitter: post submitted");
             return Ok(());
         }
-        // Composer still holds our text -> the real click didn't submit. A JS
-        // click is now safe (nothing has gone out yet) and matches the path
-        // that worked before the humanized rewrite.
-        if state == "filled" && !js_fallback_done && start.elapsed() > Duration::from_secs(4) {
+        // Not submitted yet -> the real click didn't take. Our content
+        // (text and/or attachments) is still in the composer, so a JS click
+        // is safe (nothing has gone out) and matches the path that worked
+        // before the humanized rewrite. Covers image-only tweets too, where
+        // the text is empty but the attachments still pin the draft.
+        if !js_fallback_done && start.elapsed() > Duration::from_secs(4) {
             let jr = page.evaluate(JS_CLICK).await?;
             js_fallback_done = true;
             tracing::warn!(result = %jr, "twitter: real click didn't submit; tried JS .click() fallback");
@@ -474,6 +503,47 @@ async fn run_publish_flow(page: &mut PageSession, body: &str) -> anyhow::Result<
             anyhow::bail!("twitter: composer never cleared after real+JS click — post failed (diag: {diag})");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Wait for `n` images to finish attaching to the composer after we set
+/// them on the file input. Twitter uploads media to its CDN asynchronously
+/// and shows a progress bar while doing so; clicking Post before that
+/// finishes drops the media. Ready = `n` previews rendered and no upload
+/// progress bar remains.
+async fn wait_for_media_attached(page: &mut PageSession, n: usize) -> anyhow::Result<()> {
+    let deadline = Duration::from_secs(60);
+    let start = Instant::now();
+    loop {
+        let r = page
+            .evaluate(
+                r#"(() => {
+                    const att = document.querySelector('[data-testid="attachments"]');
+                    const inAtt = att ? att.querySelectorAll('img').length : 0;
+                    const blobs = document.querySelectorAll('img[src^="blob:"]').length;
+                    // Scope the upload spinner to the attachments container —
+                    // a page-wide [role=progressbar] also matches timeline
+                    // loaders, which never clear and would hang the wait.
+                    const progress = att ? att.querySelectorAll('[role="progressbar"]').length : 0;
+                    return { previews: Math.max(inAtt, blobs), progress };
+                })()"#,
+            )
+            .await?;
+        let previews = r.get("previews").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let progress = r.get("progress").and_then(|v| v.as_u64()).unwrap_or(0);
+        if previews >= n && progress == 0 {
+            tracing::info!(previews, "twitter: media attached");
+            // Brief settle so Twitter commits the media IDs to the draft.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return Ok(());
+        }
+        if start.elapsed() > deadline {
+            anyhow::bail!(
+                "twitter: media did not finish attaching within 60s \
+                 (previews={previews}, progress={progress})"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -590,26 +660,52 @@ async fn delete_tweet_by_prefix(
     Ok(())
 }
 
+/// Validate a tweet's content + attachments before we open a browser.
+/// `body` must already be trimmed. Pure (no I/O) so it's unit-testable.
+fn validate_tweet(kind: ContentKind, body: &str, media: &[MediaPayload]) -> Result<()> {
+    // Twitter is short-form — long-form articles don't fit.
+    if matches!(kind, ContentKind::Article) {
+        return Err(PublishError::Rejected(
+            "twitter: long-form Article content doesn't fit Twitter; \
+             submit without --title for a tweet"
+                .into(),
+        ));
+    }
+    // A tweet needs *something*: text, image(s), or both. Image-only
+    // tweets are valid, so empty body is only rejected with no media.
+    if body.is_empty() && media.is_empty() {
+        return Err(PublishError::Rejected(
+            "twitter: nothing to post (empty body and no media)".into(),
+        ));
+    }
+    if body.chars().count() > selectors::MAX_TWEET_CHARS {
+        return Err(PublishError::Rejected(format!(
+            "twitter: body is {} chars; cap is {}",
+            body.chars().count(),
+            selectors::MAX_TWEET_CHARS,
+        )));
+    }
+    if media.len() > selectors::MAX_TWEET_IMAGES {
+        return Err(PublishError::Rejected(format!(
+            "twitter: {} images attached; cap is {}",
+            media.len(),
+            selectors::MAX_TWEET_IMAGES,
+        )));
+    }
+    // Browser-driven upload only handles images; a video would need
+    // Twitter's separate chunked-upload flow.
+    if let Some(bad) = media.iter().find(|m| !m.mime_type.starts_with("image/")) {
+        return Err(PublishError::Rejected(format!(
+            "twitter: media {:?} is {}, only image/* is supported",
+            bad.filename, bad.mime_type
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use multipost_core::Visibility;
-    use uuid::Uuid;
-
-    fn mk(text: &str) -> Content {
-        Content {
-            id: Uuid::nil(),
-            user_id: Uuid::nil(),
-            kind: ContentKind::Text,
-            text: text.to_string(),
-            hashtags: vec![],
-            media: vec![],
-            schedule_at: None,
-            visibility: Visibility::Public,
-            overrides: Default::default(),
-            created_at: chrono::Utc::now(),
-        }
-    }
 
     #[test]
     fn parses_minimal_credentials() {
@@ -628,31 +724,97 @@ mod tests {
         assert!(creds.display_name.is_empty());
     }
 
-    #[test]
-    fn rejects_article_content_kind() {
-        // Arrange — Article is reserved for long-form (WeChat MP, Toutiao
-        // articles); doesn't fit on Twitter.
-        let mut c = mk("title\n\nbody");
-        c.kind = ContentKind::Article;
-
-        // (We can't easily exercise the full publish path without a
-        // live Chrome, so this test only validates the kind guard
-        // by inspecting capabilities + the rejection rule below.)
-        let p = TwitterPublisher::new();
-        assert_eq!(p.platform(), Platform::Twitter);
-        assert_eq!(p.capabilities().max_text_chars, Some(280));
-        assert!(p.capabilities().delete_supported);
+    fn img(mime: &str) -> MediaPayload {
+        MediaPayload {
+            filename: format!("pic.{}", mime.rsplit('/').next().unwrap_or("bin")),
+            mime_type: mime.to_string(),
+            bytes: vec![0u8; 4],
+        }
     }
 
     #[test]
-    fn rejects_overlong_body() {
-        // Arrange
-        let body: String = "x".repeat(300);
+    fn validate_rejects_article_kind() {
+        // Arrange — Article is reserved for long-form; doesn't fit Twitter.
+        let body = "anything";
 
         // Act
-        // We can't easily mock the WebSocket path; just assert the
-        // selector constant aligns with expectations.
-        assert_eq!(selectors::MAX_TWEET_CHARS, 280);
-        assert!(body.chars().count() > selectors::MAX_TWEET_CHARS);
+        let r = validate_tweet(ContentKind::Article, body, &[]);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_allows_image_only_tweet() {
+        // Arrange — empty body but one image is a valid image-only tweet.
+        let media = vec![img("image/png")];
+
+        // Act
+        let r = validate_tweet(ContentKind::Image, "", &media);
+
+        // Assert
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_body_and_no_media() {
+        // Arrange — nothing to post.
+        // Act
+        let r = validate_tweet(ContentKind::Text, "", &[]);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_rejects_overlong_body() {
+        // Arrange
+        let body: String = "x".repeat(selectors::MAX_TWEET_CHARS + 1);
+
+        // Act
+        let r = validate_tweet(ContentKind::Text, &body, &[]);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_images() {
+        // Arrange — 5 images exceeds Twitter's cap of 4.
+        let media: Vec<_> = (0..selectors::MAX_TWEET_IMAGES + 1)
+            .map(|_| img("image/jpeg"))
+            .collect();
+
+        // Act
+        let r = validate_tweet(ContentKind::Carousel, "caption", &media);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_rejects_non_image_media() {
+        // Arrange — browser upload only supports images, not video.
+        let media = vec![img("video/mp4")];
+
+        // Act
+        let r = validate_tweet(ContentKind::Image, "caption", &media);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_accepts_text_plus_max_images() {
+        // Arrange — text + exactly 4 images is the upper bound.
+        let media: Vec<_> = (0..selectors::MAX_TWEET_IMAGES)
+            .map(|_| img("image/png"))
+            .collect();
+
+        // Act
+        let r = validate_tweet(ContentKind::Image, "caption", &media);
+
+        // Assert
+        assert!(r.is_ok());
     }
 }

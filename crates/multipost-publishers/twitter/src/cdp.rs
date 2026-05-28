@@ -270,6 +270,76 @@ impl PageSession {
         Ok(())
     }
 
+    /// Inject in-memory file bytes into the `<input type="file">` matched by
+    /// `selector`, building `File` objects client-side from base64 and
+    /// assigning them via `DataTransfer`.
+    ///
+    /// Unlike [`set_file_input_files`] — which hands Chrome a path that must
+    /// exist on the *browser host* — this carries the bytes over the CDP
+    /// WebSocket, so it works against a remote Chrome with no filesystem
+    /// access. That's the only option for the cookie-auth publishers
+    /// (Toutiao, Twitter) whose credentials carry no SSH info to stage files
+    /// host-side the way Douyin's video upload does.
+    ///
+    /// `files` is `(filename, mime_type, bytes)`. All entries are assigned in
+    /// a single `change` event, so a `multiple` input receives them as one
+    /// batch — same as a user multi-selecting in the OS file picker.
+    pub async fn upload_files_to_input(
+        &mut self,
+        selector: &str,
+        files: &[(&str, &str, &[u8])],
+    ) -> Result<()> {
+        use base64::Engine as _;
+        // Stage uploads on the page in `window.__mpUploads`.
+        self.evaluate("window.__mpUploads = [];").await?;
+        for (name, mime, bytes) in files {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            // Stream the base64 in chunks so no single Runtime.evaluate frame
+            // carries multi-MB of JS source (mirrors the body-fill chunking).
+            self.evaluate("window.__mpCur = '';").await?;
+            for chunk in b64.as_bytes().chunks(512 * 1024) {
+                // base64's alphabet is ASCII, so every chunk is valid UTF-8.
+                let piece = std::str::from_utf8(chunk).expect("base64 is ascii");
+                let val = serde_json::to_string(piece)?;
+                self.evaluate(&format!("window.__mpCur += {val};")).await?;
+            }
+            let name_json = serde_json::to_string(name)?;
+            let mime_json = serde_json::to_string(mime)?;
+            self.evaluate(&format!(
+                "window.__mpUploads.push({{name: {name_json}, mime: {mime_json}, b64: window.__mpCur}});"
+            ))
+            .await?;
+        }
+
+        let sel_json = serde_json::to_string(selector)?;
+        // Decode with `atob` + `Uint8Array`, NOT `fetch("data:...")`:
+        // strict CSPs (x.com's `connect-src`) block fetching data: URLs,
+        // which fails the whole upload. atob is unrestricted.
+        let inject_js = format!(
+            r#"(() => {{
+                const input = document.querySelector({sel_json});
+                if (!input) return {{ok: false, reason: 'no file input for selector'}};
+                const dt = new DataTransfer();
+                for (const u of window.__mpUploads) {{
+                    const bin = atob(u.b64);
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                    dt.items.add(new File([bytes], u.name, {{type: u.mime}}));
+                }}
+                input.files = dt.files;
+                input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                window.__mpUploads = []; window.__mpCur = '';
+                return {{ok: true, count: input.files.length}};
+            }})()"#
+        );
+        let r = self.evaluate(&inject_js).await?;
+        if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!("upload_files_to_input failed: {r}");
+        }
+        Ok(())
+    }
+
     /// Dispatch a real OS-level mouse event via CDP `Input.dispatchMouseEvent`.
     /// Use this when JS-synthesized `MouseEvent`s aren't enough — some
     /// frameworks (Toutiao's byte-design hover-reveal among them) only

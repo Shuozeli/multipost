@@ -45,3 +45,15 @@ pub const TWEET_ARTICLE: &str = r#"article[role="article"]"#;
 /// Premium / X users get 25,000, but we conservatively reject above
 /// 280 since most accounts are on the base tier.
 pub const MAX_TWEET_CHARS: usize = 280;
+
+/// The composer's hidden `<input type="file">` for image/video uploads.
+/// We stream image bytes into it over CDP (the Chrome is remote).
+pub const FILE_INPUT: &str = r#"[data-testid="fileInput"]"#;
+
+/// Twitter accepts at most 4 images per tweet.
+pub const MAX_TWEET_IMAGES: usize = 4;
+
+/// Container that holds the media previews once images are attached.
+/// Used to detect upload completion (previews rendered) and post success
+/// (container cleared after submit).
+pub const ATTACHMENTS: &str = r#"[data-testid="attachments"]"#;

@@ -62,3 +62,26 @@ pub const WEITOUTIAO_MANAGE_URL: &str = "https://mp.toutiao.com/profile_v4/weito
 
 /// Text label on the 微头条 publish button. Auto-publish clicks this.
 pub const WEITOUTIAO_PUBLISH_LABEL: &str = "发布";
+
+/// The 微头条 toolbar's image button. Clicking it opens the
+/// "上传图片" panel (`.upload-image-panel`) which lazily mounts the file
+/// inputs. The button's only text is "图片" — the toolbar also has
+/// 图片-labeled wrapper span/div elements that must NOT be clicked.
+pub const WEITOUTIAO_IMAGE_BUTTON_LABEL: &str = "图片";
+
+/// CSS for the upload panel's image `<input type="file">`. The panel has
+/// two (a browse button + a drag target), both `accept="image/*"
+/// multiple`; `querySelector` picks the first (browse), which is the one
+/// the live probe confirmed triggers the upload on `change`.
+pub const WEITOUTIAO_IMAGE_INPUT: &str = r#"input[type="file"][accept*="image"]"#;
+
+/// The "上传图片" modal panel container — used to detect when it has
+/// closed after clicking 确定 to insert the images.
+pub const WEITOUTIAO_UPLOAD_PANEL: &str = ".upload-image-panel, .upload-handler-drag";
+
+/// Label on the panel's confirm button that inserts the uploaded images
+/// into the post.
+pub const WEITOUTIAO_INSERT_CONFIRM_LABEL: &str = "确定";
+
+/// 微头条 accepts up to 9 images per post.
+pub const WEITOUTIAO_MAX_IMAGES: usize = 9;

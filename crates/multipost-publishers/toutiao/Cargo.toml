@@ -11,6 +11,7 @@ description = "Toutiao (头条号) browser-automation publisher for multipost."
 multipost-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true

@@ -86,7 +86,10 @@ impl Publisher for ToutiaoPublisher {
         // article is the whole point).
         Capabilities {
             max_text_chars: None,
-            max_images: Some(20), // editor supports inline images; we don't use yet
+            // 微头条 image posts accept up to 9 images (enforced in
+            // publish_weitoutiao). Article inline images are a separate,
+            // unbuilt path.
+            max_images: Some(selectors::WEITOUTIAO_MAX_IMAGES),
             video_supported: false,
             video_max_seconds: None,
             schedule_supported: false,
@@ -130,10 +133,15 @@ impl Publisher for ToutiaoPublisher {
         let creds = parse_credentials(ctx.credentials)?;
         match content.kind {
             multipost_core::ContentKind::Article => publish_article(&creds, content).await,
-            multipost_core::ContentKind::Text => publish_weitoutiao(&creds, content).await,
+            multipost_core::ContentKind::Text => {
+                publish_weitoutiao(&creds, content, &[]).await
+            }
+            multipost_core::ContentKind::Image | multipost_core::ContentKind::Carousel => {
+                publish_weitoutiao(&creds, content, &ctx.media).await
+            }
             other => Err(PublishError::Rejected(format!(
                 "toutiao: ContentKind::{other:?} not supported \
-                 (only Article → graphic editor and Text → 微头条)"
+                 (Article → graphic editor, Text → 微头条, Image/Carousel → 微头条 with images)"
             ))),
         }
     }
@@ -509,27 +517,60 @@ async fn publish_article(
     })
 }
 
-/// 微头条 (short-form) path — single ProseMirror body, no title.
+/// Toutiao caps 微头条 around 2000 chars in practice.
+const WEITOUTIAO_MAX_CHARS: usize = 2000;
+
+/// Validate a 微头条 post before opening a browser. `body` must already be
+/// markdown-stripped + trimmed. Pure (no I/O) so it's unit-testable.
+///
+/// Body text is required even for image posts: both publish-confirmation
+/// and `delete()` key off the body-text prefix on the dashboard.
+fn validate_weitoutiao(body: &str, media: &[MediaPayload]) -> Result<()> {
+    if body.is_empty() {
+        return Err(PublishError::Rejected(
+            "toutiao 微头条: body text is required (used for publish \
+             confirmation + delete lookup), even when posting images"
+                .into(),
+        ));
+    }
+    if body.chars().count() > WEITOUTIAO_MAX_CHARS {
+        return Err(PublishError::Rejected(format!(
+            "toutiao 微头条: body is {} chars; cap is {}",
+            body.chars().count(),
+            WEITOUTIAO_MAX_CHARS,
+        )));
+    }
+    if media.len() > selectors::WEITOUTIAO_MAX_IMAGES {
+        return Err(PublishError::Rejected(format!(
+            "toutiao 微头条: {} images attached; cap is {}",
+            media.len(),
+            selectors::WEITOUTIAO_MAX_IMAGES
+        )));
+    }
+    if let Some(bad) = media.iter().find(|m| !m.mime_type.starts_with("image/")) {
+        return Err(PublishError::Rejected(format!(
+            "toutiao 微头条: media {:?} is {}, only image/* is supported",
+            bad.filename, bad.mime_type
+        )));
+    }
+    Ok(())
+}
+
+/// 微头条 (short-form) path — single ProseMirror body, optional images.
 /// Auto-publishes (clicks 发布). `external_id` is the first 30 chars of
 /// the body, used for later delete lookups on the 微头条 manage page.
+///
+/// `media` carries pre-resolved image payloads (empty for a text-only
+/// 微头条). Image-only 微头条 (empty body) are rejected: both the
+/// publish-confirmation and `delete()` key off the body-text prefix, and
+/// the realistic flow always carries a caption.
 async fn publish_weitoutiao(
     creds: &ToutiaoCredentials,
     content: &Content,
+    media: &[MediaPayload],
 ) -> Result<PublishHandle> {
     let body = strip_markdown(content.text.trim());
-    if body.is_empty() {
-        return Err(PublishError::Rejected(
-            "toutiao 微头条: empty body".into(),
-        ));
-    }
-    // Toutiao caps 微头条 around 2000 chars in practice. Reject very
-    // long bodies up-front instead of letting the editor truncate.
-    if body.chars().count() > 2000 {
-        return Err(PublishError::Rejected(format!(
-            "toutiao 微头条: body is {} chars; cap is 2000",
-            body.chars().count()
-        )));
-    }
+    validate_weitoutiao(&body, media)?;
 
     let session = BrowserSession::connect(&creds.cdp_url)
         .await
@@ -544,7 +585,7 @@ async fn publish_weitoutiao(
         .await
         .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
 
-    run_weitoutiao_flow(&mut page, &body)
+    run_weitoutiao_flow(&mut page, &body, media)
         .await
         .map_err(|e| PublishError::Transient(format!("toutiao weitoutiao: {e}")))?;
 
@@ -557,8 +598,136 @@ async fn publish_weitoutiao(
     })
 }
 
-/// 微头条 publish flow on an already-open tab.
-async fn run_weitoutiao_flow(page: &mut PageSession, body: &str) -> anyhow::Result<()> {
+/// Attach images to the open 微头条 editor: click 图片 → wait for the
+/// upload panel → stream bytes into its image `<input type=file>` → wait
+/// for the upload to land → click 确定 to insert → wait for the panel to
+/// close. Selectors mapped from the live `/weitoutiao/publish` DOM.
+async fn insert_weitoutiao_images(
+    page: &mut PageSession,
+    media: &[MediaPayload],
+) -> anyhow::Result<()> {
+    // 1. Click the 图片 toolbar button. It's a <button> whose only text is
+    //    "图片"; the toolbar also has 图片-labeled span/div wrappers we must
+    //    not click. Opening the panel lazily mounts the file inputs.
+    let click_img_js = r#"(() => {
+        const btn = Array.from(document.querySelectorAll('button'))
+            .find(b => (b.innerText || '').trim() === '图片' && b.offsetParent !== null);
+        if (!btn) return {ok: false, reason: 'no 图片 button'};
+        btn.click();
+        return {ok: true};
+    })()"#;
+    let r = page.evaluate(click_img_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("click 图片 failed: {r}");
+    }
+    tracing::info!("toutiao 微头条: clicked 图片, waiting for upload panel");
+
+    // 2. Wait for the upload panel's image file input to mount.
+    let start = Instant::now();
+    loop {
+        let present = page
+            .evaluate(
+                r#"!!document.querySelector('input[type="file"][accept*="image"]')"#,
+            )
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if present {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            anyhow::bail!("微头条 image upload panel did not open within 20s");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // 3. Stream the bytes into the (multiple) image input in one batch.
+    let files: Vec<(&str, &str, &[u8])> = media
+        .iter()
+        .map(|m| (m.filename.as_str(), m.mime_type.as_str(), m.bytes.as_slice()))
+        .collect();
+    page.upload_files_to_input(selectors::WEITOUTIAO_IMAGE_INPUT, &files)
+        .await?;
+    tracing::info!(n = media.len(), "toutiao 微头条: images set on file input");
+
+    // 4. Wait for the upload round-trip: the panel shows "已上传 N 张图片"
+    //    and renders the uploaded thumbnail(s) from Toutiao's image CDN.
+    let n = media.len();
+    let start = Instant::now();
+    loop {
+        let count = page
+            .evaluate(
+                r#"(() => {
+                    const m = (document.body.innerText || '').match(/已上传\s*(\d+)\s*张图片/);
+                    const uploaded = m ? parseInt(m[1], 10) : 0;
+                    const cdn = Array.from(document.querySelectorAll('img'))
+                        .filter(i => /image-tt-private|sf\d+-cdn-tos|toutiaoimg|p\d+-sign/.test(i.src || ''))
+                        .length;
+                    return Math.max(uploaded, cdn);
+                })()"#,
+            )
+            .await?
+            .as_u64()
+            .unwrap_or(0) as usize;
+        if count >= n {
+            tracing::info!(count, "toutiao 微头条: images uploaded");
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(90) {
+            anyhow::bail!("微头条 images did not finish uploading within 90s (got {count}/{n})");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // 5. Click 确定 to insert the images into the post. The panel mounts on
+    //    top, so its confirm button is the last visible 确定 on the page.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let confirm_js = r#"(() => {
+        const btns = Array.from(document.querySelectorAll('button'))
+            .filter(b => b.offsetParent !== null && (b.innerText || '').trim() === '确定');
+        if (btns.length === 0) return {ok: false, reason: 'no 确定 button'};
+        btns[btns.length - 1].click();
+        return {ok: true};
+    })()"#;
+    let r = page.evaluate(confirm_js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("click 确定 (insert images) failed: {r}");
+    }
+    tracing::info!("toutiao 微头条: clicked 确定 to insert images");
+
+    // 6. Wait for the panel to close so the editor regains focus + the
+    //    发布 button is interactable.
+    let start = Instant::now();
+    loop {
+        let open = page
+            .evaluate(
+                r#"(() => {
+                    const p = document.querySelector('.upload-image-panel, .upload-handler-drag');
+                    return !!(p && p.getBoundingClientRect().width > 50);
+                })()"#,
+            )
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !open {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(15) {
+            anyhow::bail!("微头条 upload panel did not close within 15s after 确定");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    tracing::info!("toutiao 微头条: image panel closed");
+    Ok(())
+}
+
+/// 微头条 publish flow on an already-open tab. `media` is empty for a
+/// text-only post; otherwise images are inserted after the body is filled.
+async fn run_weitoutiao_flow(
+    page: &mut PageSession,
+    body: &str,
+    media: &[MediaPayload],
+) -> anyhow::Result<()> {
     let prefix: String = body.chars().take(30).collect();
     // Wait for the ProseMirror editor to mount.
     let deadline = Duration::from_secs(45);
@@ -650,6 +819,12 @@ async fn run_weitoutiao_flow(page: &mut PageSession, body: &str) -> anyhow::Resu
             "微头条 editor has {editor_len} non-space chars but body has {body_nows} — \
              leftover draft detected (concatenation guard); refusing to publish a merged post"
         );
+    }
+
+    // Attach images (if any) before publishing. Runs after the guard so the
+    // text check sees only the caption (images add thumbnails, not text).
+    if !media.is_empty() {
+        insert_weitoutiao_images(page, media).await?;
     }
 
     // Click 发布. Wait briefly for the button to become enabled after the
@@ -916,9 +1091,6 @@ async fn fill_body(page: &mut PageSession, body: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn _link_media_payload(_: &MediaPayload) {} // keep type imported for future image-attach work
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,5 +1163,76 @@ mod tests {
         assert_eq!(p.platform(), Platform::Toutiao);
         assert!(!c.video_supported);
         assert_eq!(c.max_text_chars, None);
+        assert_eq!(c.max_images, Some(selectors::WEITOUTIAO_MAX_IMAGES));
+    }
+
+    fn img(mime: &str) -> MediaPayload {
+        MediaPayload {
+            filename: "pic.png".into(),
+            mime_type: mime.to_string(),
+            bytes: vec![0u8; 4],
+        }
+    }
+
+    #[test]
+    fn validate_weitoutiao_accepts_text_with_images() {
+        // Arrange — caption + 2 images is the common image-post shape.
+        let media = vec![img("image/png"), img("image/jpeg")];
+
+        // Act
+        let r = validate_weitoutiao("今日财经速览", &media);
+
+        // Assert
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn validate_weitoutiao_rejects_empty_body_even_with_images() {
+        // Arrange — body text is required for confirm + delete lookup.
+        let media = vec![img("image/png")];
+
+        // Act
+        let r = validate_weitoutiao("", &media);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_weitoutiao_rejects_too_many_images() {
+        // Arrange — 10 images exceeds the cap of 9.
+        let media: Vec<_> = (0..selectors::WEITOUTIAO_MAX_IMAGES + 1)
+            .map(|_| img("image/png"))
+            .collect();
+
+        // Act
+        let r = validate_weitoutiao("caption", &media);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_weitoutiao_rejects_non_image_media() {
+        // Arrange — only image/* is supported on the 微头条 image path.
+        let media = vec![img("video/mp4")];
+
+        // Act
+        let r = validate_weitoutiao("caption", &media);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
+    }
+
+    #[test]
+    fn validate_weitoutiao_rejects_overlong_body() {
+        // Arrange
+        let body: String = "字".repeat(WEITOUTIAO_MAX_CHARS + 1);
+
+        // Act
+        let r = validate_weitoutiao(&body, &[]);
+
+        // Assert
+        assert!(matches!(r, Err(PublishError::Rejected(_))));
     }
 }
