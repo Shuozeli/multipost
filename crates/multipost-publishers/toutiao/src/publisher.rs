@@ -578,6 +578,13 @@ async fn publish_weitoutiao(
         .await
         .map_err(|e| PublishError::Transient(format!("toutiao open_page: {e}")))?;
 
+    // Foreground the tab: create_tab opens it in the background, and the
+    // image-insert 确定 button needs a genuine click on the FOREGROUND tab
+    // (see PageSession::bring_to_front). Non-fatal for text-only posts.
+    if let Err(e) = page.bring_to_front().await {
+        tracing::warn!(error = %e, "toutiao 微头条: bring_to_front failed; image 确定 click may not land");
+    }
+
     run_weitoutiao_flow(&mut page, &body, media)
         .await
         .map_err(|e| PublishError::Transient(format!("toutiao weitoutiao: {e}")))?;
@@ -632,6 +639,16 @@ async fn insert_weitoutiao_images(
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
+    // Re-foreground right before the upload: byte-design's upload XHR needs the
+    // tab to be active. The standalone probe stays foreground and registers in
+    // ~2s; the server's longer flow can lose focus, after which the upload
+    // never registers. Log visibility/focus for diagnosis.
+    let _ = page.bring_to_front().await;
+    let vis = page
+        .evaluate(r#"JSON.stringify({vis: document.visibilityState, focus: document.hasFocus()})"#)
+        .await?;
+    tracing::info!(state = %vis, "toutiao 微头条: pre-upload tab state");
+
     // 3. Stream the bytes into the (multiple) image input in one batch.
     let files: Vec<(&str, &str, &[u8])> = media
         .iter()
@@ -647,94 +664,102 @@ async fn insert_weitoutiao_images(
         .await?;
     tracing::info!(n = media.len(), "toutiao 微头条: images set on file input");
 
-    // 4. Wait for the upload round-trip: the panel shows "已上传 N 张图片"
-    //    and renders the uploaded thumbnail(s) from Toutiao's image CDN.
+    // 4. Wait for the REAL upload round-trip. The byte-injection already
+    //    handed byte-design a valid File (verified: assignment sticks +
+    //    onChange consumes it), but the CDN upload XHR can take many seconds
+    //    on a fresh editor tab. The ONLY trusted "done" signals are the
+    //    drawer's own "已上传 N 张图片" counter and the confirm button leaving
+    //    its disabled state. We deliberately do NOT scan page-wide for CDN
+    //    <img> tags: the logged-in user's avatar is served from the same CDN
+    //    and false-positives the gate in ~17ms, which dumps the flow into the
+    //    确定 step while the real upload is still in flight (the original bug).
     let n = media.len();
     let start = Instant::now();
+    let probe_js = format!(
+        r#"(() => {{
+            const m = (document.body.innerText || '').match(/已上传\s*(\d+)\s*张图片/);
+            const uploaded = m ? parseInt(m[1], 10) : 0;
+            const cb = document.querySelector('button[data-e2e="imageUploadConfirm-btn"]');
+            const confirmEnabled = !!cb && !cb.disabled;
+            return uploaded >= {n} && confirmEnabled;
+        }})()"#
+    );
     loop {
-        let count = page
-            .evaluate(
-                r#"(() => {
-                    const m = (document.body.innerText || '').match(/已上传\s*(\d+)\s*张图片/);
-                    const uploaded = m ? parseInt(m[1], 10) : 0;
-                    const cdn = Array.from(document.querySelectorAll('img'))
-                        .filter(i => /image-tt-private|sf\d+-cdn-tos|toutiaoimg|p\d+-sign/.test(i.src || ''))
-                        .length;
-                    return Math.max(uploaded, cdn);
-                })()"#,
-            )
-            .await?
-            .as_u64()
-            .unwrap_or(0) as usize;
-        if count >= n {
-            tracing::info!(count, "toutiao 微头条: images uploaded");
+        let done = page.evaluate(&probe_js).await?.as_bool().unwrap_or(false);
+        if done {
+            tracing::info!(elapsed_ms = start.elapsed().as_millis() as u64,
+                "toutiao 微头条: upload registered (已上传 + 确定 enabled)");
             break;
         }
         if start.elapsed() > Duration::from_secs(90) {
-            anyhow::bail!("微头条 images did not finish uploading within 90s (got {count}/{n})");
+            anyhow::bail!("微头条 image upload did not register within 90s (no 已上传 N / 确定 stayed disabled)");
+        }
+        if start.elapsed().as_secs() % 5 == 0 {
+            tracing::info!(elapsed_s = start.elapsed().as_secs(), "toutiao 微头条: awaiting upload…");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // 5+6. Click 确定 to insert the images, then wait for the drawer to close
-    //       (so the editor regains focus and 发布 is interactable).
+    // 5+6. Click 确定 to insert the images via a TRUSTED real-mouse click,
+    //       then wait for the confirm button to disappear (= drawer committed).
     //
-    //       The confirm button lives in a `position: fixed` byte-design drawer
-    //       (`.mp-ic-img-drawer`). Elements inside a fixed-positioned ancestor
-    //       have `offsetParent === null` even when fully visible, so the old
-    //       `offsetParent !== null` filter either found NO 确定 button
-    //       ("no 确定 button") or matched the wrong visible 确定 elsewhere and
-    //       the drawer never closed. Select by the stable data-e2e attribute
-    //       with a `getClientRects()` visibility check (fixed-safe), and
-    //       re-click each poll until the drawer is actually gone — byte-design
-    //       can swallow the first click while the panel settles.
+    //       The byte-design 确定 button (button[data-e2e=imageUploadConfirm-btn],
+    //       inside a position:fixed drawer) only honors a GENUINE (isTrusted)
+    //       click. A JS `.click()` or a synthetic pointer/mouse event is
+    //       silently ignored and the drawer never closes ("确定 never found").
+    //       A CDP Input mouse click (real_click) IS trusted — but Chrome only
+    //       hit-tests the FOREGROUND tab, so the tab was foregrounded in
+    //       publish_weitoutiao (bring_to_front) before this runs.
+    //
+    //       Close signal: the 确定 button is GONE. The `.byte-drawer-wrapper`
+    //       node lingers as an empty shell after commit, so its presence is NOT
+    //       a reliable "still open" signal (it was the old false-positive).
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let click_confirm_js = r#"(() => {
-        const vis = el => !!el && el.getClientRects().length > 0 && !el.disabled;
-        // Stable selector from the live /weitoutiao/publish DOM.
-        let btn = document.querySelector('button[data-e2e="imageUploadConfirm-btn"]');
-        if (!vis(btn)) {
-            // Fallback: a visible 确定 inside the image drawer/panel only.
-            const scope = document.querySelector(
-                '.mp-ic-img-drawer, .upload-image-panel, .upload-handler-drag'
-            ) || document;
-            const cands = Array.from(scope.querySelectorAll('button'))
-                .filter(b => (b.innerText || '').trim() === '确定' && vis(b));
-            btn = cands[cands.length - 1] || null;
-        }
-        if (!vis(btn)) return {found: false};
-        btn.click();
-        return {found: true};
+    let rect_js = r#"(() => {
+        const b = document.querySelector('button[data-e2e="imageUploadConfirm-btn"]');
+        if (!b) return null;
+        const r = b.getClientRects()[0];
+        if (!r) return null;
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
     })()"#;
-    let drawer_open_js = r#"(() => {
-        const p = document.querySelector(
-            '.mp-ic-img-drawer, .upload-image-panel, .upload-handler-drag'
-        );
-        return !!(p && p.getClientRects().length > 0 && p.getBoundingClientRect().width > 50);
+    let confirm_gone_js = r#"(() => {
+        const b = document.querySelector('button[data-e2e="imageUploadConfirm-btn"]');
+        return !b || b.getClientRects().length === 0;
     })()"#;
-    let mut ever_found = false;
     let start = Instant::now();
+    let mut clicked = false;
     loop {
-        let r = page.evaluate(click_confirm_js).await?;
-        if r.get("found").and_then(|v| v.as_bool()).unwrap_or(false) {
-            ever_found = true;
+        // Re-locate + re-click each pass: byte-design can swallow the first
+        // genuine click while the panel settles.
+        let r = page.evaluate(rect_js).await?;
+        if let (Some(x), Some(y)) = (
+            r.get("x").and_then(|v| v.as_f64()),
+            r.get("y").and_then(|v| v.as_f64()),
+        ) {
+            page.real_click(x, y).await?;
+            clicked = true;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let open = page.evaluate(drawer_open_js).await?.as_bool().unwrap_or(false);
-        if !open {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let gone = page
+            .evaluate(confirm_gone_js)
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if gone {
             break;
         }
         if start.elapsed() > Duration::from_secs(20) {
-            if !ever_found {
+            if !clicked {
                 anyhow::bail!(
-                    "微头条 image-insert 确定 button never found (drawer still open) — \
-                     selector button[data-e2e=imageUploadConfirm-btn] may have changed"
+                    "微头条 image-insert 确定 never appeared (upload did not register)"
                 );
             }
-            anyhow::bail!("微头条 upload drawer did not close within 20s after clicking 确定");
+            anyhow::bail!(
+                "微头条 image-insert 确定 did not commit within 20s (drawer open after trusted clicks)"
+            );
         }
     }
-    tracing::info!(ever_found, "toutiao 微头条: images inserted, drawer closed");
+    tracing::info!("toutiao 微头条: images inserted via trusted 确定 click");
     Ok(())
 }
 
@@ -778,29 +803,55 @@ async fn run_weitoutiao_flow(
     // leftover draft and two separate posts publish as ONE concatenated
     // 微头条 (observed 2026-05-24: 快递618 + 山西煤矿 merged). selectAll +
     // delete goes through the beforeinput path ProseMirror honors.
+    // Clear BOTH leftover text and leftover images (a prior failed attempt's
+    // auto-restored draft can carry either). selectAll + delete removes text
+    // and ProseMirror image nodes; we loop until the editor reports zero of
+    // both.
     let clear_js = r#"(() => {
         const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
         if (!ed) return {ok: false};
         ed.focus();
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
-        return {ok: true, len: (ed.innerText || '').replace(/\s+/g, '').length};
+        return {
+            ok: true,
+            len: (ed.innerText || '').replace(/\s+/g, '').length,
+            imgs: ed.querySelectorAll('img').length,
+        };
     })()"#;
     let mut cleared = false;
-    for _ in 0..3 {
+    for _ in 0..5 {
         let r = page.evaluate(clear_js).await?;
         if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             anyhow::bail!("focus/clear 微头条 editor failed");
         }
-        if r.get("len").and_then(|v| v.as_u64()).unwrap_or(1) == 0 {
+        let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(1);
+        let imgs = r.get("imgs").and_then(|v| v.as_u64()).unwrap_or(1);
+        if len == 0 && imgs == 0 {
             cleared = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     if !cleared {
+        // A leftover draft IMAGE that selectAll+delete can't remove would
+        // publish a stale image alongside this caption — fail closed.
+        let leftover_imgs = page
+            .evaluate(
+                r#"(() => { const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
+                    return ed ? ed.querySelectorAll('img').length : 0; })()"#,
+            )
+            .await?
+            .as_i64()
+            .unwrap_or(0);
+        if leftover_imgs > 0 {
+            anyhow::bail!(
+                "微头条 editor still has {leftover_imgs} leftover draft image(s) after clear — \
+                 refusing to publish (would merge a stale draft image into this post)"
+            );
+        }
         tracing::warn!(
-            "toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover"
+            "toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover text"
         );
     }
 

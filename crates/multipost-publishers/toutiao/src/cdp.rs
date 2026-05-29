@@ -393,4 +393,17 @@ impl PageSession {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         Ok(())
     }
+
+    /// Bring this page's tab to the foreground (`Page.bringToFront`).
+    ///
+    /// Tabs created via `create_tab` open in the background. Chrome does not
+    /// run hit-testing for a hidden tab, so real CDP mouse events
+    /// (`dispatch_mouse_event` / `real_click`) land on nothing. The byte-design
+    /// 微头条 image-insert 确定 button only honors a genuine (isTrusted) click,
+    /// so it MUST be clicked via `real_click` on a foregrounded tab — a JS
+    /// `.click()` or synthetic event is ignored. Foreground first.
+    pub async fn bring_to_front(&mut self) -> Result<()> {
+        self.send("Page.bringToFront", json!({})).await?;
+        Ok(())
+    }
 }
