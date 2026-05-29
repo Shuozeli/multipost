@@ -122,14 +122,14 @@ impl MediaRepository for FileBackedMediaRepository {
 
     async fn delete(&self, user_id: Uuid, id: Uuid) -> AccountResult<()> {
         let mut state = self.state.lock().expect("media-store mutex poisoned");
-        if let Some(m) = state.media.get(&id) {
-            if m.user_id == user_id {
-                let path = m.path.clone();
-                state.media.remove(&id);
-                self.save(&state)?;
-                if path.exists() {
-                    std::fs::remove_file(&path).map_err(AccountError::Io)?;
-                }
+        if let Some(m) = state.media.get(&id)
+            && m.user_id == user_id
+        {
+            let path = m.path.clone();
+            state.media.remove(&id);
+            self.save(&state)?;
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(AccountError::Io)?;
             }
         }
         Ok(())

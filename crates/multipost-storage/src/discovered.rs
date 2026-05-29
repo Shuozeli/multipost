@@ -52,7 +52,11 @@ pub trait DiscoveredRepository: Send + Sync {
     ) -> DiscoveredResult<Option<DiscoveredItem>>;
 
     /// List the N most-recently-captured items for a platform.
-    async fn recent(&self, platform: Platform, limit: usize) -> DiscoveredResult<Vec<DiscoveredItem>>;
+    async fn recent(
+        &self,
+        platform: Platform,
+        limit: usize,
+    ) -> DiscoveredResult<Vec<DiscoveredItem>>;
 }
 
 /// SQLite-backed implementation.
@@ -172,10 +176,7 @@ const SELECT_RECENT: &str = "SELECT platform, item_id, captured_at, author_handl
      ORDER BY captured_at DESC
      LIMIT ?2";
 
-fn upsert_one(
-    conn: &Connection,
-    item: &DiscoveredItem,
-) -> DiscoveredResult<()> {
+fn upsert_one(conn: &Connection, item: &DiscoveredItem) -> DiscoveredResult<()> {
     let plat_str = platform_to_str(item.platform);
     let metadata_json = serde_json::to_string(&item.metadata)?;
     conn.execute(
@@ -348,7 +349,9 @@ mod tests {
     async fn upsert_many_inserts_all() {
         // Arrange
         let repo = SqliteDiscoveredRepository::in_memory().unwrap();
-        let items: Vec<_> = (0..5).map(|i| sample_item(&format!("id-{i}"), 10 * i)).collect();
+        let items: Vec<_> = (0..5)
+            .map(|i| sample_item(&format!("id-{i}"), 10 * i))
+            .collect();
 
         // Act
         let n = repo.upsert_many(&items).await.unwrap();

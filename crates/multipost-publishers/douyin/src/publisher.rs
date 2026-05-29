@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use crate::cdp::{BrowserSession, PageSession};
 use crate::credentials::DouyinCredentials;
-use crate::staging::{cleanup_file, stage_file, StagedFile};
-use crate::{selectors, CREATOR_BASE, UPLOAD_URL};
+use crate::staging::{StagedFile, cleanup_file, stage_file};
+use crate::{CREATOR_BASE, UPLOAD_URL, selectors};
 
 /// Douyin publisher.
 ///
@@ -68,9 +68,7 @@ async fn probe_creator_url(cdp_url: &str) -> anyhow::Result<String> {
             // Break as soon as we see a /creator-micro/* URL (logged in)
             // or a login/passport URL (logged out) — anything other than
             // the splash root.
-            if url.contains("/creator-micro/")
-                || url.contains("login")
-                || url.contains("passport")
+            if url.contains("/creator-micro/") || url.contains("login") || url.contains("passport")
             {
                 break;
             }
@@ -154,8 +152,7 @@ impl Publisher for DouyinPublisher {
 
         // 2. Drive Chrome. On any failure, clean up the staged file before
         //    returning.
-        let outcome =
-            drive_upload(&creds, &staged, &title, &description, content.visibility).await;
+        let outcome = drive_upload(&creds, &staged, &title, &description, content.visibility).await;
         // Best-effort cleanup either way.
         let _ = cleanup_file(&creds, &staged).await;
         outcome
@@ -207,7 +204,10 @@ enum RowStatus {
 
 /// Open a fresh manage tab, find the row whose innerText contains `title`,
 /// and return its status + the manage URL we landed on.
-async fn inspect_row(creds: &DouyinCredentials, title: &str) -> anyhow::Result<(RowStatus, String)> {
+async fn inspect_row(
+    creds: &DouyinCredentials,
+    title: &str,
+) -> anyhow::Result<(RowStatus, String)> {
     let session = BrowserSession::connect(&creds.cdp_url).await?;
     let tab = session.create_tab(selectors::MANAGE_URL).await?;
     let mut page = session.open_page(&tab).await?;
@@ -322,7 +322,11 @@ async fn delete_row(creds: &DouyinCredentials, title: &str) -> anyhow::Result<()
         }})()"#
     );
     let click_result = page.evaluate(&click_delete_js).await?;
-    if !click_result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !click_result
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         anyhow::bail!("click 删除作品 failed: {click_result}");
     }
     tracing::info!(title, "douyin: clicked 删除作品");
@@ -368,12 +372,7 @@ async fn delete_row(creds: &DouyinCredentials, title: &str) -> anyhow::Result<()
     // Up to 10s for the deletion to reflect.
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
-        if page
-            .evaluate(&check_js)
-            .await?
-            .as_bool()
-            .unwrap_or(false)
-        {
+        if page.evaluate(&check_js).await?.as_bool().unwrap_or(false) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -480,7 +479,7 @@ async fn run_upload_flow(
         .map_err(|e| PublishError::Transient(format!("douyin file input: {e}")))?;
     tracing::info!(node = input_node, "douyin: located file input");
 
-    page.set_file_input_files(input_node, &[staged.remote_path.clone()])
+    page.set_file_input_files(input_node, std::slice::from_ref(&staged.remote_path))
         .await
         .map_err(|e| PublishError::Transient(format!("douyin setFileInputFiles: {e}")))?;
 
@@ -545,9 +544,13 @@ async fn run_upload_flow(
     // in the URL, e.g.
     //   /creator-micro/content/manage?type=video
     //   /creator-micro/content/manage/video?modal_id=<id>  (rare)
-    wait_for_url_match(page, "/creator-micro/content/manage", Duration::from_secs(240))
-        .await
-        .map_err(|e| PublishError::Transient(format!("douyin post-publish redirect: {e}")))?;
+    wait_for_url_match(
+        page,
+        "/creator-micro/content/manage",
+        Duration::from_secs(240),
+    )
+    .await
+    .map_err(|e| PublishError::Transient(format!("douyin post-publish redirect: {e}")))?;
 
     let final_url_v = page
         .evaluate("location.href")
@@ -568,10 +571,7 @@ struct VisibilitySelection {
 }
 
 /// Click the visibility radio that matches the requested `Visibility`.
-async fn select_visibility(
-    page: &mut PageSession,
-    vis: Visibility,
-) -> Result<VisibilitySelection> {
+async fn select_visibility(page: &mut PageSession, vis: Visibility) -> Result<VisibilitySelection> {
     let label = match vis {
         Visibility::Public => selectors::VISIBILITY_PUBLIC_LABEL,
         Visibility::Followers => selectors::VISIBILITY_FRIENDS_LABEL,
@@ -653,7 +653,6 @@ async fn click_publish(page: &mut PageSession) -> anyhow::Result<()> {
     tracing::info!("douyin: clicked 发布");
     Ok(())
 }
-
 
 /// Poll for a node matching `selector` to appear under the document root.
 ///
@@ -791,7 +790,6 @@ async fn fill_description(page: &mut PageSession, body: &str) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use multipost_core::Visibility;
 
     #[test]
     fn parse_credentials_round_trip() {

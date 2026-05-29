@@ -13,11 +13,11 @@ pub mod stats;
 pub mod tenants;
 
 // Re-export the connection helper at the crate root.
-pub use connection::{connect, DbPool};
+pub use connection::{DbPool, connect};
 
 mod connection {
-    use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
 
     /// Wrapper around the sqlx connection pool. Renamed for callers'
     /// convenience.

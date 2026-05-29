@@ -21,7 +21,7 @@
 pub mod auth;
 pub mod publisher;
 
-pub use auth::{check_account_info, ensure_access_token, WxGzhCredentials};
+pub use auth::{WxGzhCredentials, check_account_info, ensure_access_token};
 pub use publisher::WxGzhPublisher;
 
 /// WeChat MP API base.

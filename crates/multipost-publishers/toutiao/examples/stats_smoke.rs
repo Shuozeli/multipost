@@ -9,7 +9,10 @@ use multipost_publishers_toutiao::ToutiaoStatsCollector;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cdp = std::env::var("CDP_URL").expect("set CDP_URL");
-    let max_posts: usize = std::env::var("MAX_POSTS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let max_posts: usize = std::env::var("MAX_POSTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
 
     let opts = StatsOptions {
         cdp_url: Some(cdp),

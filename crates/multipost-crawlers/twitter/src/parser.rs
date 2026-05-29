@@ -119,7 +119,11 @@ fn decode_item_content(ic: Option<&Value>, captured_at: DateTime<Utc>) -> Option
     let display_name = user_core
         .and_then(|c| c.get("name"))
         .and_then(Value::as_str)
-        .or_else(|| user_legacy.and_then(|l| l.get("name")).and_then(Value::as_str))
+        .or_else(|| {
+            user_legacy
+                .and_then(|l| l.get("name"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or("");
     let author_handle = screen_name.to_string();
     let author_name = if !display_name.is_empty() && display_name != author_handle {
@@ -141,9 +145,7 @@ fn decode_item_content(ic: Option<&Value>, captured_at: DateTime<Utc>) -> Option
     };
 
     let url = if !author_handle.is_empty() {
-        Some(format!(
-            "https://x.com/{author_handle}/status/{rest_id}"
-        ))
+        Some(format!("https://x.com/{author_handle}/status/{rest_id}"))
     } else {
         None
     };
@@ -178,7 +180,9 @@ mod tests {
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(1_700_000_000_000).single().unwrap()
+        Utc.timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .unwrap()
     }
 
     fn make_tweet_entry(rest_id: &str, screen: &str, text: &str, faves: i64) -> Value {

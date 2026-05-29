@@ -258,9 +258,7 @@ fn classify(c: &Value) -> String {
     let article_type = loose_i64(&c["articleType"]).unwrap_or(0);
     if group_source == 5 {
         "微头条".to_string()
-    } else if article_type == 1 {
-        "文章".to_string()
-    } else if article_type == 0 && group_source != 5 {
+    } else if matches!(article_type, 0 | 1) {
         "文章".to_string()
     } else {
         "视频".to_string()

@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use multipost_core::{
-    CrawlOptions, Crawler, DiscoveredItem, Platform, PublishError, Result,
-};
+use multipost_core::{CrawlOptions, Crawler, DiscoveredItem, Platform, PublishError, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;

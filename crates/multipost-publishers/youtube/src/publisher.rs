@@ -17,8 +17,8 @@ use multipost_core::{
     PublishError, PublishHandle, Publisher, Result, Visibility,
 };
 
-use crate::auth::{refresh_token as do_refresh, OAuthCredentials, OAuthTokens};
 use crate::API_BASE;
+use crate::auth::{OAuthCredentials, OAuthTokens, refresh_token as do_refresh};
 
 const UPLOAD_BASE: &str = "https://www.googleapis.com/upload/youtube/v3";
 const REFRESH_MARGIN_SECS: i64 = 60;
@@ -87,18 +87,14 @@ fn read_access_token(creds: &serde_json::Value) -> Result<&str> {
     creds
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            PublishError::Other(anyhow::anyhow!("credentials missing access_token"))
-        })
+        .ok_or_else(|| PublishError::Other(anyhow::anyhow!("credentials missing access_token")))
 }
 
 fn read_refresh_token(creds: &serde_json::Value) -> Result<&str> {
     creds
         .get("refresh_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            PublishError::AuthExpired("youtube (no refresh_token to renew with)")
-        })
+        .ok_or_else(|| PublishError::AuthExpired("youtube (no refresh_token to renew with)"))
 }
 
 fn now_secs() -> i64 {
@@ -117,7 +113,7 @@ fn visibility_to_privacy(v: Visibility) -> &'static str {
     }
 }
 
-fn extract_title<'a>(content: &'a Content) -> &'a str {
+fn extract_title(content: &Content) -> &str {
     if !content.text.is_empty() {
         // Title-only mode: first line of `text` is title, rest is description.
         // We keep the simple split here; callers wanting different mapping can
@@ -128,7 +124,7 @@ fn extract_title<'a>(content: &'a Content) -> &'a str {
     }
 }
 
-fn extract_description<'a>(content: &'a Content) -> &'a str {
+fn extract_description(content: &Content) -> &str {
     if let Some(idx) = content.text.find('\n') {
         // Skip the title line and trim leading whitespace.
         content.text[idx + 1..].trim_start()
@@ -146,7 +142,7 @@ impl Publisher for YouTubePublisher {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             max_text_chars: Some(5000), // YouTube description limit
-            max_images: Some(1),         // custom thumbnail
+            max_images: Some(1),        // custom thumbnail
             video_supported: true,
             video_max_seconds: Some(12 * 3600),
             schedule_supported: true,
@@ -227,7 +223,10 @@ impl Publisher for YouTubePublisher {
         content: &Content,
     ) -> Result<PublishHandle> {
         // YouTube requires exactly one video payload.
-        if !matches!(content.kind, ContentKind::ShortVideo | ContentKind::LongVideo) {
+        if !matches!(
+            content.kind,
+            ContentKind::ShortVideo | ContentKind::LongVideo
+        ) {
             return Err(PublishError::Rejected(format!(
                 "YouTube requires a video; got kind={:?}",
                 content.kind
@@ -236,7 +235,9 @@ impl Publisher for YouTubePublisher {
         let video = ctx
             .media
             .first()
-            .ok_or_else(|| PublishError::Rejected("YouTube needs at least one media payload".into()))?
+            .ok_or_else(|| {
+                PublishError::Rejected("YouTube needs at least one media payload".into())
+            })?
             .clone();
         if video.bytes.is_empty() {
             return Err(PublishError::Rejected("video payload is empty".into()));
@@ -275,9 +276,10 @@ impl Publisher for YouTubePublisher {
             .header("Content-Type", "application/json; charset=UTF-8")
             .header("X-Upload-Content-Type", &video.mime_type)
             .header("X-Upload-Content-Length", video.bytes.len().to_string())
-            .body(serde_json::to_vec(&metadata).map_err(|e| {
-                PublishError::Other(anyhow::anyhow!("serialize metadata: {e}"))
-            })?)
+            .body(
+                serde_json::to_vec(&metadata)
+                    .map_err(|e| PublishError::Other(anyhow::anyhow!("serialize metadata: {e}")))?,
+            )
             .send()
             .await
             .map_err(|e| PublishError::Transient(format!("youtube init upload: {e}")))?;

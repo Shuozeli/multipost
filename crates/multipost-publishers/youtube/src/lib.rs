@@ -12,7 +12,7 @@
 pub mod auth;
 pub mod publisher;
 
-pub use auth::{exchange_code, refresh_token, start_oauth_url, OAuthCredentials, OAuthTokens};
+pub use auth::{OAuthCredentials, OAuthTokens, exchange_code, refresh_token, start_oauth_url};
 pub use publisher::YouTubePublisher;
 
 /// Default OAuth scopes we request. Equivalent to `scripts/youtube/05_oauth_login.py`.

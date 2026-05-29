@@ -9,14 +9,14 @@ use chrono::{DateTime, Utc};
 use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher, StatsCollector};
 use multipost_orchestrator::JobState;
 use multipost_proto::crawl::CrawlJobState as ProtoCrawlJobState;
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 use multipost_publishers_youtube::OAuthCredentials;
 use multipost_storage::accounts::AccountRepository;
 use multipost_storage::discovered::DiscoveredRepository;
 use multipost_storage::jobs::JobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
 use multipost_storage::stats::StatsRepository;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// Per-platform OAuth client config, loaded from env at startup.
@@ -158,7 +158,11 @@ impl AppState {
     /// Spawn a confirm-poll task and register its JoinHandle so graceful
     /// shutdown can wait for it. The task self-removes its entry from
     /// `confirm_tasks` on completion so the map only holds in-flight work.
-    pub fn spawn_confirm(self: &Arc<Self>, job_id: Uuid, fut: impl Future<Output = ()> + Send + 'static) {
+    pub fn spawn_confirm(
+        self: &Arc<Self>,
+        job_id: Uuid,
+        fut: impl Future<Output = ()> + Send + 'static,
+    ) {
         let me = Arc::clone(self);
         let handle = tokio::spawn(async move {
             fut.await;

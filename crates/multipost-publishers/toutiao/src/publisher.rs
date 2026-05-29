@@ -61,10 +61,7 @@ async fn probe_creator_url(cdp_url: &str) -> anyhow::Result<String> {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(t) = session.get_target(&new_tab.id).await? {
             url = t.url.clone();
-            if url.contains("/profile_v4/")
-                || url.contains("login")
-                || url.contains("passport")
-            {
+            if url.contains("/profile_v4/") || url.contains("login") || url.contains("passport") {
                 break;
             }
         }
@@ -133,9 +130,7 @@ impl Publisher for ToutiaoPublisher {
         let creds = parse_credentials(ctx.credentials)?;
         match content.kind {
             multipost_core::ContentKind::Article => publish_article(&creds, content).await,
-            multipost_core::ContentKind::Text => {
-                publish_weitoutiao(&creds, content, &[]).await
-            }
+            multipost_core::ContentKind::Text => publish_weitoutiao(&creds, content, &[]).await,
             multipost_core::ContentKind::Image | multipost_core::ContentKind::Carousel => {
                 publish_weitoutiao(&creds, content, &ctx.media).await
             }
@@ -240,11 +235,7 @@ async fn delete_draft_by_title(creds: &ToutiaoCredentials, title: &str) -> anyho
     let _ = wait_js; // unused; keep `wait_rows_js`
     let start = Instant::now();
     loop {
-        let n = page
-            .evaluate(&wait_rows_js)
-            .await?
-            .as_u64()
-            .unwrap_or(0);
+        let n = page.evaluate(&wait_rows_js).await?.as_u64().unwrap_or(0);
         if n > 0 {
             tracing::info!(rows = n, "toutiao: draft rows visible");
             break;
@@ -464,7 +455,12 @@ async fn delete_weitoutiao_by_prefix(
     );
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
-        if page.evaluate(&check_gone_js).await?.as_bool().unwrap_or(false) {
+        if page
+            .evaluate(&check_gone_js)
+            .await?
+            .as_bool()
+            .unwrap_or(false)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -476,10 +472,7 @@ async fn delete_weitoutiao_by_prefix(
 /// Long-form article path — graphic editor, fill title + body, stop
 /// before 预览并发布 (Toutiao auto-saves to 草稿箱). Mirrors what the
 /// old inline `publish()` did before the 微头条 split.
-async fn publish_article(
-    creds: &ToutiaoCredentials,
-    content: &Content,
-) -> Result<PublishHandle> {
+async fn publish_article(creds: &ToutiaoCredentials, content: &Content) -> Result<PublishHandle> {
     let (title, body) = split_title_and_body(content);
     if title.chars().count() > 30 {
         return Err(PublishError::Rejected(format!(
@@ -626,9 +619,7 @@ async fn insert_weitoutiao_images(
     let start = Instant::now();
     loop {
         let present = page
-            .evaluate(
-                r#"!!document.querySelector('input[type="file"][accept*="image"]')"#,
-            )
+            .evaluate(r#"!!document.querySelector('input[type="file"][accept*="image"]')"#)
             .await?
             .as_bool()
             .unwrap_or(false);
@@ -644,7 +635,13 @@ async fn insert_weitoutiao_images(
     // 3. Stream the bytes into the (multiple) image input in one batch.
     let files: Vec<(&str, &str, &[u8])> = media
         .iter()
-        .map(|m| (m.filename.as_str(), m.mime_type.as_str(), m.bytes.as_slice()))
+        .map(|m| {
+            (
+                m.filename.as_str(),
+                m.mime_type.as_str(),
+                m.bytes.as_slice(),
+            )
+        })
         .collect();
     page.upload_files_to_input(selectors::WEITOUTIAO_IMAGE_INPUT, &files)
         .await?;
@@ -782,7 +779,9 @@ async fn run_weitoutiao_flow(
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
     if !cleared {
-        tracing::warn!("toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover");
+        tracing::warn!(
+            "toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover"
+        );
     }
 
     // Chunked execCommand insertText (same trick as articles).
@@ -866,13 +865,12 @@ async fn run_weitoutiao_flow(
     let deadline = Duration::from_secs(45);
     let start = Instant::now();
     loop {
-        let landed = page
-            .evaluate(&check_js)
-            .await?
-            .as_bool()
-            .unwrap_or(false);
+        let landed = page.evaluate(&check_js).await?.as_bool().unwrap_or(false);
         if landed {
-            tracing::info!(chars = body.chars().count(), "toutiao: 微头条 confirmed on dashboard");
+            tracing::info!(
+                chars = body.chars().count(),
+                "toutiao: 微头条 confirmed on dashboard"
+            );
             return Ok(());
         }
         if start.elapsed() > deadline {
@@ -901,10 +899,7 @@ fn split_title_and_body(content: &Content) -> (String, String) {
                 if trimmed.is_empty() {
                     continue;
                 }
-                break trimmed
-                    .strip_prefix("# ")
-                    .unwrap_or(trimmed)
-                    .to_string();
+                break trimmed.strip_prefix("# ").unwrap_or(trimmed).to_string();
             }
         }
     };
@@ -948,11 +943,7 @@ fn strip_bold_inline(s: &str) -> String {
     out
 }
 
-async fn run_publish_flow(
-    page: &mut PageSession,
-    title: &str,
-    body: &str,
-) -> Result<()> {
+async fn run_publish_flow(page: &mut PageSession, title: &str, body: &str) -> Result<()> {
     // Wait for the publish editor to mount. Toutiao's SPA hydrates the
     // title input + the contenteditable body within ~5s on a warm Chrome,
     // longer on a cold one — give it 45s headroom.
@@ -974,7 +965,10 @@ async fn run_publish_flow(
             )
             .await
             .map_err(|e| PublishError::Transient(format!("toutiao probe form: {e}")))?;
-        let ok_title = probe.get("title").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok_title = probe
+            .get("title")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let ok_body = probe.get("body").and_then(|v| v.as_bool()).unwrap_or(false);
         if ok_title && ok_body {
             break;

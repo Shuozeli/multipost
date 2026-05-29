@@ -1,4 +1,5 @@
-//! Storage for profile-stats snapshots collected by [`StatsCollector`]s.
+//! Storage for profile-stats snapshots collected by
+//! [`StatsCollector`](multipost_core::StatsCollector)s.
 //!
 //! Backed by SQLite (the same `~/.multipost/discovered.sqlite` file or a
 //! dedicated one). Unlike [`discovered`](crate::discovered) — which keeps
@@ -84,14 +85,18 @@ impl SqliteStatsRepository {
     pub fn open(path: impl AsRef<Path>) -> StatsResult<Self> {
         let conn = Connection::open(path)?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory SQLite database. Useful for tests.
     pub fn in_memory() -> StatsResult<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn init_schema(conn: &Connection) -> StatsResult<()> {
@@ -217,7 +222,10 @@ impl StatsRepository for SqliteStatsRepository {
              ORDER BY captured_at DESC LIMIT 1",
         )?;
         let row = stmt
-            .query_row(params![platform_to_str(platform), account_id.to_string()], row_to_account)
+            .query_row(
+                params![platform_to_str(platform), account_id.to_string()],
+                row_to_account,
+            )
             .optional()?;
         match row {
             Some(r) => Ok(Some(r?)),
@@ -241,7 +249,11 @@ impl StatsRepository for SqliteStatsRepository {
              ORDER BY captured_at DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
-            params![platform_to_str(platform), account_id.to_string(), limit as i64],
+            params![
+                platform_to_str(platform),
+                account_id.to_string(),
+                limit as i64
+            ],
             row_to_account,
         )?;
         let mut out = Vec::new();
@@ -273,7 +285,11 @@ impl StatsRepository for SqliteStatsRepository {
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(
-            params![platform_to_str(platform), account_id.to_string(), limit as i64],
+            params![
+                platform_to_str(platform),
+                account_id.to_string(),
+                limit as i64
+            ],
             row_to_post,
         )?;
         let mut out = Vec::new();
@@ -380,7 +396,11 @@ mod tests {
         repo.insert_account(acc, &acct(20, 2000)).await.unwrap();
 
         // Act
-        let latest = repo.latest_account(Platform::Toutiao, acc).await.unwrap().unwrap();
+        let latest = repo
+            .latest_account(Platform::Toutiao, acc)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Assert
         assert_eq!(latest.followers, Some(20));
@@ -396,7 +416,10 @@ mod tests {
         repo.insert_account(acc, &acct(20, 2000)).await.unwrap();
 
         // Act
-        let hist = repo.account_history(Platform::Toutiao, acc, 10).await.unwrap();
+        let hist = repo
+            .account_history(Platform::Toutiao, acc, 10)
+            .await
+            .unwrap();
 
         // Assert
         assert_eq!(hist.len(), 2);
@@ -409,7 +432,9 @@ mod tests {
         // Arrange — two snapshots of the same post, plus a second post.
         let repo = SqliteStatsRepository::in_memory().unwrap();
         let acc = Uuid::nil();
-        repo.insert_posts(acc, &[post("a", 100, 1000)]).await.unwrap();
+        repo.insert_posts(acc, &[post("a", 100, 1000)])
+            .await
+            .unwrap();
         repo.insert_posts(acc, &[post("a", 150, 2000), post("b", 5, 2000)])
             .await
             .unwrap();

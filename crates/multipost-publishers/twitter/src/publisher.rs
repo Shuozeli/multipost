@@ -316,7 +316,10 @@ async fn run_publish_flow(
 
     // Type the body one scalar at a time with human cadence.
     type_humanlike(page, body).await?;
-    tracing::info!(chars = body.chars().count(), "twitter: body typed (humanlike)");
+    tracing::info!(
+        chars = body.chars().count(),
+        "twitter: body typed (humanlike)"
+    );
 
     // Attach images, if any. The composer toolbar — including the hidden
     // media `<input type=file>` — is mounted now that we've focused +
@@ -342,7 +345,13 @@ async fn run_publish_flow(
         }
         let files: Vec<(&str, &str, &[u8])> = media
             .iter()
-            .map(|m| (m.filename.as_str(), m.mime_type.as_str(), m.bytes.as_slice()))
+            .map(|m| {
+                (
+                    m.filename.as_str(),
+                    m.mime_type.as_str(),
+                    m.bytes.as_slice(),
+                )
+            })
             .collect();
         page.upload_files_to_input(selectors::FILE_INPUT, &files)
             .await?;
@@ -374,10 +383,7 @@ async fn run_publish_flow(
             )
             .await?;
         let found = r.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
-        let disabled = r
-            .get("disabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let disabled = r.get("disabled").and_then(|v| v.as_bool()).unwrap_or(true);
         if found && !disabled {
             break;
         }
@@ -401,7 +407,9 @@ async fn run_publish_flow(
             tracing::warn!(result = %fr, "twitter: per-keystroke typing left Post disabled; used execCommand fill fallback");
         }
         if start.elapsed() > wait_btn_deadline {
-            anyhow::bail!("Post button stayed disabled — body fill may not have hit Draft state (execCommand fallback also failed)");
+            anyhow::bail!(
+                "Post button stayed disabled — body fill may not have hit Draft state (execCommand fallback also failed)"
+            );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -466,7 +474,11 @@ async fn run_publish_flow(
         // clearing is the real signal (text alone would false-positive).
         let submitted = (state == "empty" || state == "gone") && att_empty;
         if submitted {
-            tracing::info!(state, fellback = js_fallback_done, "twitter: post submitted");
+            tracing::info!(
+                state,
+                fellback = js_fallback_done,
+                "twitter: post submitted"
+            );
             return Ok(());
         }
         // Not submitted yet -> the real click didn't take. Our content
@@ -500,7 +512,9 @@ async fn run_publish_flow(
                 .await
                 .unwrap_or(serde_json::Value::Null);
             tracing::error!(diagnostics = %diag, "twitter: composer never cleared — page state dump");
-            anyhow::bail!("twitter: composer never cleared after real+JS click — post failed (diag: {diag})");
+            anyhow::bail!(
+                "twitter: composer never cleared after real+JS click — post failed (diag: {diag})"
+            );
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -549,10 +563,7 @@ async fn wait_for_media_attached(page: &mut PageSession, n: usize) -> anyhow::Re
 
 /// Navigate to `/<handle>`, find the tweet whose first 30 chars match
 /// `prefix`, open its caret menu, click Delete, confirm.
-async fn delete_tweet_by_prefix(
-    creds: &TwitterCredentials,
-    prefix: &str,
-) -> anyhow::Result<()> {
+async fn delete_tweet_by_prefix(creds: &TwitterCredentials, prefix: &str) -> anyhow::Result<()> {
     let session = BrowserSession::connect(&creds.cdp_url).await?;
     let url = format!("https://x.com/{}", creds.handle);
     let tab = session.create_tab(&url).await?;
@@ -570,7 +581,9 @@ async fn delete_tweet_by_prefix(
             break;
         }
         if start.elapsed() > Duration::from_secs(30) {
-            anyhow::bail!("twitter: profile timeline empty after 30s — wrong handle or rate-limited?");
+            anyhow::bail!(
+                "twitter: profile timeline empty after 30s — wrong handle or rate-limited?"
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -651,7 +664,12 @@ async fn delete_tweet_by_prefix(
     );
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
-        if page.evaluate(&check_gone_js).await?.as_bool().unwrap_or(false) {
+        if page
+            .evaluate(&check_gone_js)
+            .await?
+            .as_bool()
+            .unwrap_or(false)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

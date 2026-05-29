@@ -149,7 +149,7 @@ impl JobRepository for FileBackedJobRepository {
             .filter(|j| j.user_id == user_id)
             .cloned()
             .collect();
-        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         all.truncate(limit);
         Ok(all)
     }
@@ -200,7 +200,7 @@ impl JobRepository for FileBackedJobRepository {
             .filter(|j| j.created_at >= newer_than)
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         Ok(out)
     }
 }

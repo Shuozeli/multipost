@@ -11,8 +11,8 @@ use multipost_core::{
     PublishError, PublishHandle, Publisher, Result, Visibility,
 };
 
-use crate::auth::{check_account_info, ensure_access_token, WxGzhCredentials};
 use crate::API_BASE;
+use crate::auth::{WxGzhCredentials, check_account_info, ensure_access_token};
 
 /// WeChat MP publisher.
 ///
@@ -48,36 +48,33 @@ fn classify_wechat_error(errcode: i64, errmsg: &str) -> PublishError {
         // 40001 / 42001 / 40014 — token invalid or expired
         40001 | 42001 | 40014 => PublishError::AuthExpired("wx-gzh"),
         // 40164 — IP not in whitelist
-        40164 => PublishError::Transient(format!(
+        40164 => PublishError::Transient(
             "wx-gzh: IP not whitelisted (errcode 40164) — add this server's egress IP \
              to https://mp.weixin.qq.com → 设置与开发 → 基本配置 \
              → IP白名单"
-        )),
+                .to_string(),
+        ),
         // 48001 — api unauthorized (individual subscription accounts can't freepublish/submit)
-        48001 => PublishError::Rejected(format!(
+        48001 => PublishError::Rejected(
             "wx-gzh: API not authorized for this account type (errcode 48001). \
              freepublish/submit requires 企业认证 (enterprise verification). \
              Draft is created — publish manually in MP admin if you can't upgrade."
-        )),
+                .to_string(),
+        ),
         // 45004 — digest too long
         45004 => PublishError::Rejected(format!(
             "wx-gzh: digest exceeds 120 chars (errcode 45004): {errmsg}"
         )),
-        _ => PublishError::Other(anyhow::anyhow!(
-            "wx-gzh errcode={errcode} errmsg={errmsg}"
-        )),
+        _ => PublishError::Other(anyhow::anyhow!("wx-gzh errcode={errcode} errmsg={errmsg}")),
     }
 }
 
 fn check_wechat_response(body: &serde_json::Value) -> Result<()> {
-    if let Some(code) = body.get("errcode").and_then(|v| v.as_i64()) {
-        if code != 0 {
-            let msg = body
-                .get("errmsg")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            return Err(classify_wechat_error(code, msg));
-        }
+    if let Some(code) = body.get("errcode").and_then(|v| v.as_i64())
+        && code != 0
+    {
+        let msg = body.get("errmsg").and_then(|v| v.as_str()).unwrap_or("");
+        return Err(classify_wechat_error(code, msg));
     }
     Ok(())
 }
@@ -142,7 +139,7 @@ fn make_html_body(content: &Content) -> String {
 /// task lists). Same option set the Python `markdown.markdown(..., extensions=["extra"])`
 /// gives us.
 fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{Options, Parser, html};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -162,7 +159,8 @@ fn markdown_to_html(md: &str) -> String {
 fn inject_inline_styles(html: &str) -> String {
     const STYLE_P: &str = "font-size:16px;line-height:1.8;margin:14px 0;color:#333;";
     const STYLE_H2: &str = "font-size:19px;line-height:1.5;margin:24px 0 12px;color:#1a1a1a;border-left:4px solid #c9302c;padding-left:10px;font-weight:600;";
-    const STYLE_H3: &str = "font-size:17px;line-height:1.5;margin:18px 0 10px;color:#333;font-weight:600;";
+    const STYLE_H3: &str =
+        "font-size:17px;line-height:1.5;margin:18px 0 10px;color:#333;font-weight:600;";
     const STYLE_UL: &str = "padding-left:20px;margin:8px 0;";
     const STYLE_LI: &str = "margin:8px 0;line-height:1.75;";
     const STYLE_HR: &str = "border:none;border-top:1px dashed #ccc;margin:24px 0;";
@@ -179,7 +177,10 @@ fn inject_inline_styles(html: &str) -> String {
         .replace("<hr/>", &format!(r#"<hr style="{STYLE_HR}" />"#))
         .replace("<hr>", &format!(r#"<hr style="{STYLE_HR}" />"#))
         .replace("<strong>", &format!(r#"<strong style="{STYLE_STRONG}">"#))
-        .replace("<blockquote>", &format!(r#"<blockquote style="{STYLE_BLOCKQUOTE}">"#))
+        .replace(
+            "<blockquote>",
+            &format!(r#"<blockquote style="{STYLE_BLOCKQUOTE}">"#),
+        )
 }
 
 #[async_trait]
@@ -191,7 +192,7 @@ impl Publisher for WxGzhPublisher {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             max_text_chars: Some(20_000), // body HTML can be quite long
-            max_images: Some(1),           // thumb_media_id only (Phase 2)
+            max_images: Some(1),          // thumb_media_id only (Phase 2)
             video_supported: false,
             video_max_seconds: None,
             schedule_supported: false,
@@ -303,9 +304,8 @@ impl Publisher for WxGzhPublisher {
             .await
             .map_err(|e| PublishError::Other(anyhow::anyhow!("parse material response: {e}")))?;
         check_wechat_response(&material_value)?;
-        let material: MaterialAddResponse = serde_json::from_value(material_value).map_err(|e| {
-            PublishError::Other(anyhow::anyhow!("deserialize material: {e}"))
-        })?;
+        let material: MaterialAddResponse = serde_json::from_value(material_value)
+            .map_err(|e| PublishError::Other(anyhow::anyhow!("deserialize material: {e}")))?;
         let thumb_media_id = material.media_id.ok_or_else(|| {
             PublishError::Other(anyhow::anyhow!(
                 "material/add_material returned no media_id"
@@ -346,9 +346,8 @@ impl Publisher for WxGzhPublisher {
             .await
             .map_err(|e| PublishError::Other(anyhow::anyhow!("parse draft/add: {e}")))?;
         check_wechat_response(&draft_value)?;
-        let draft: DraftAddResponse = serde_json::from_value(draft_value).map_err(|e| {
-            PublishError::Other(anyhow::anyhow!("deserialize draft/add: {e}"))
-        })?;
+        let draft: DraftAddResponse = serde_json::from_value(draft_value)
+            .map_err(|e| PublishError::Other(anyhow::anyhow!("deserialize draft/add: {e}")))?;
         let draft_media_id = draft.media_id.ok_or_else(|| {
             PublishError::Other(anyhow::anyhow!("draft/add returned no media_id"))
         })?;
@@ -372,9 +371,7 @@ impl Publisher for WxGzhPublisher {
         match check_wechat_response(&submit_value) {
             Ok(()) => {
                 let submit: FreepublishSubmitResponse = serde_json::from_value(submit_value)
-                    .map_err(|e| {
-                        PublishError::Other(anyhow::anyhow!("deserialize submit: {e}"))
-                    })?;
+                    .map_err(|e| PublishError::Other(anyhow::anyhow!("deserialize submit: {e}")))?;
                 let publish_id = submit.publish_id.unwrap_or_default();
                 tracing::info!(
                     publish_id = %publish_id,
@@ -509,7 +506,11 @@ mod tests {
         let long = "x".repeat(500);
         let c = mk_content(&format!("Title\n\n{long}"));
         let d = make_digest(&c);
-        assert!(d.chars().count() <= 120, "digest is {} chars", d.chars().count());
+        assert!(
+            d.chars().count() <= 120,
+            "digest is {} chars",
+            d.chars().count()
+        );
         assert!(d.ends_with("..."));
     }
 
@@ -528,9 +529,7 @@ mod tests {
     fn markdown_h2_gets_styled() {
         // Arrange — H2 + bold + bullet list, the article building blocks
         // every financial-digest article exercises.
-        let c = mk_content(
-            "财经早报\n\n## 一、 国际地缘\n\n* **要点**：内容描述\n* 另一个要点",
-        );
+        let c = mk_content("财经早报\n\n## 一、 国际地缘\n\n* **要点**：内容描述\n* 另一个要点");
 
         // Act
         let h = make_html_body(&c);

@@ -18,8 +18,8 @@ use multipost_core::{CrawlOptions, DiscoveredItem, Platform};
 use multipost_proto::crawl::crawl_server::Crawl as CrawlTrait;
 use multipost_proto::crawl::{
     CrawlJob as ProtoCrawlJob, CrawlJobState as ProtoCrawlJobState,
-    DiscoveredItem as ProtoDiscoveredItem, DiscoveryMetrics as ProtoMetrics,
-    GetCrawlJobRequest, ListItemsRequest, ListItemsResponse, SubmitCrawlRequest,
+    DiscoveredItem as ProtoDiscoveredItem, DiscoveryMetrics as ProtoMetrics, GetCrawlJobRequest,
+    ListItemsRequest, ListItemsResponse, SubmitCrawlRequest,
 };
 
 use crate::state::{AppState, CrawlJobInternal};
@@ -84,7 +84,9 @@ impl CrawlTrait for CrawlService {
             run_crawl_job(st, job_id, platform, duration).await;
         });
 
-        Ok(Response::new(to_proto(&internal, /* include_items */ false)))
+        Ok(Response::new(to_proto(
+            &internal, /* include_items */ false,
+        )))
     }
 
     async fn get_job(
@@ -229,7 +231,9 @@ fn transition(state: &Arc<AppState>, job_id: Uuid, mutate: impl FnOnce(&mut Craw
             Ok(m) => m,
             Err(_) => return,
         };
-        let Some(j) = map.get_mut(&job_id) else { return };
+        let Some(j) = map.get_mut(&job_id) else {
+            return;
+        };
         mutate(j);
         j.clone()
     };

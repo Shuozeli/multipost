@@ -79,13 +79,13 @@ pub async fn ensure_access_token(
         .json::<StableTokenResponse>()
         .await
         .context("parse stable_token response")?;
-    if let Some(code) = body.errcode {
-        if code != 0 {
-            anyhow::bail!(
-                "WeChat stable_token errcode={code} errmsg={}",
-                body.errmsg.unwrap_or_default()
-            );
-        }
+    if let Some(code) = body.errcode
+        && code != 0
+    {
+        anyhow::bail!(
+            "WeChat stable_token errcode={code} errmsg={}",
+            body.errmsg.unwrap_or_default()
+        );
     }
     let access_token = body
         .access_token
@@ -115,13 +115,13 @@ pub async fn check_account_info(
         .await
         .context("get account/getaccountbasicinfo")?;
     let body: serde_json::Value = resp.json().await.context("parse account info")?;
-    if let Some(code) = body.get("errcode").and_then(|v| v.as_i64()) {
-        if code != 0 {
-            anyhow::bail!(
-                "WeChat account/getaccountbasicinfo errcode={code} errmsg={}",
-                body.get("errmsg").and_then(|v| v.as_str()).unwrap_or("")
-            );
-        }
+    if let Some(code) = body.get("errcode").and_then(|v| v.as_i64())
+        && code != 0
+    {
+        anyhow::bail!(
+            "WeChat account/getaccountbasicinfo errcode={code} errmsg={}",
+            body.get("errmsg").and_then(|v| v.as_str()).unwrap_or("")
+        );
     }
-    Ok(serde_json::from_value(body).context("deserialize account info")?)
+    serde_json::from_value(body).context("deserialize account info")
 }

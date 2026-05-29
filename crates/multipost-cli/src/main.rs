@@ -14,8 +14,8 @@ use tracing::Level;
 
 use multipost_proto::accounts::accounts_client::AccountsClient;
 use multipost_proto::accounts::{
-    complete_auth_request, start_auth_response, CompleteAuthRequest, ListAccountsRequest,
-    RegisterDeveloperRequest, StartAuthRequest,
+    CompleteAuthRequest, ListAccountsRequest, RegisterDeveloperRequest, StartAuthRequest,
+    complete_auth_request, start_auth_response,
 };
 use multipost_proto::common::{Platform as ProtoPlatform, Visibility};
 use multipost_proto::crawl::crawl_client::CrawlClient;
@@ -23,7 +23,7 @@ use multipost_proto::crawl::{
     CrawlJobState as ProtoCrawlJobState, GetCrawlJobRequest, ListItemsRequest, SubmitCrawlRequest,
 };
 use multipost_proto::media::media_client::MediaClient;
-use multipost_proto::media::{upload_chunk, UploadChunk, UploadMeta};
+use multipost_proto::media::{UploadChunk, UploadMeta, upload_chunk};
 use multipost_proto::posts::posts_client::PostsClient;
 use multipost_proto::posts::{Content, GetJobRequest, JobRef, ListJobsRequest, SubmitRequest};
 use multipost_proto::stats::stats_client::StatsClient;
@@ -33,13 +33,17 @@ use multipost_proto::stats::{
 };
 use multipost_storage::tenants::FileBackedTenantRepository;
 
-const UPLOAD_CHUNK: usize = 1 * 1024 * 1024; // 1 MiB
+const UPLOAD_CHUNK: usize = 1024 * 1024; // 1 MiB
 
 #[derive(Parser, Debug)]
 #[command(name = "multipost", version)]
 struct Cli {
     /// Server URL.
-    #[arg(long, env = "MULTIPOST_SERVER", default_value = "http://localhost:8188")]
+    #[arg(
+        long,
+        env = "MULTIPOST_SERVER",
+        default_value = "http://localhost:8188"
+    )]
     server: String,
 
     /// API key for authenticating against the server. Sent as
@@ -365,7 +369,17 @@ async fn main() -> anyhow::Result<()> {
             privacy,
         } => {
             handle_post(
-                &cli.server, auth, to, video, image, title, description, tags, privacy,
+                &cli.server,
+                auth,
+                PostArgs {
+                    to,
+                    video,
+                    images: image,
+                    title,
+                    description,
+                    tags,
+                    privacy,
+                },
             )
             .await
         }
@@ -382,9 +396,7 @@ struct AuthInterceptor {
 
 impl AuthInterceptor {
     fn new(api_key: Option<String>) -> Self {
-        let header = api_key.and_then(|k| {
-            MetadataValue::try_from(format!("Bearer {k}")).ok()
-        });
+        let header = api_key.and_then(|k| MetadataValue::try_from(format!("Bearer {k}")).ok());
         Self { header }
     }
 }
@@ -487,7 +499,10 @@ async fn handle_crawl(
         })
         .await?
         .into_inner();
-    println!("submitted crawl job {} ({}, {}s)", submitted.id, submitted.platform, submitted.duration_secs);
+    println!(
+        "submitted crawl job {} ({}, {}s)",
+        submitted.id, submitted.platform, submitted.duration_secs
+    );
     println!("waiting up to {}s for completion ...", duration + 30);
 
     // Long-poll until terminal.
@@ -531,8 +546,13 @@ fn print_items(items: &[multipost_proto::crawl::DiscoveredItem]) {
         return;
     }
     for (i, it) in items.iter().enumerate() {
-        let m = it.metrics.clone().unwrap_or_default();
-        let text: String = it.body.chars().take(60).collect::<String>().replace('\n', " ");
+        let m = it.metrics.unwrap_or_default();
+        let text: String = it
+            .body
+            .chars()
+            .take(60)
+            .collect::<String>()
+            .replace('\n', " ");
         let handle: String = it.author_handle.chars().take(16).collect();
         println!(
             "  [{:>3}] {:<16} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
@@ -550,10 +570,10 @@ fn print_items(items: &[multipost_proto::crawl::DiscoveredItem]) {
 }
 
 fn expand_path(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(p)
 }
@@ -579,7 +599,7 @@ fn handle_tenants(data_dir: &str, action: TenantsAction) -> anyhow::Result<()> {
                 println!("(no tenants — run `multipost tenants create --name <...>`)");
                 return Ok(());
             }
-            println!("{:<38} {:<24} {}", "ID", "NAME", "KEY_HASHES");
+            println!("{:<38} {:<24} KEY_HASHES", "ID", "NAME");
             for t in tenants {
                 let hashes = t
                     .key_hashes
@@ -633,8 +653,8 @@ async fn handle_accounts(
                 println!("(no accounts)");
             } else {
                 println!(
-                    "{:<38} {:<10} {:<24} {}",
-                    "ID", "PLATFORM", "EXTERNAL_ID", "DISPLAY"
+                    "{:<38} {:<10} {:<24} DISPLAY",
+                    "ID", "PLATFORM", "EXTERNAL_ID"
                 );
                 for a in accounts {
                     let plat =
@@ -661,7 +681,10 @@ async fn handle_accounts(
                     println!("  {url}\n");
                     println!("After approving, the browser will redirect to a localhost URL");
                     println!("containing `?code=...&state=...`. Run:\n");
-                    println!("  multipost accounts complete {} <code>", resp.pending_auth_id);
+                    println!(
+                        "  multipost accounts complete {} <code>",
+                        resp.pending_auth_id
+                    );
                 }
                 Some(start_auth_response::Method::BrowserSession(s)) => {
                     println!("Browser-automation auth session: {}", s.session_id);
@@ -850,9 +873,9 @@ async fn upload_media(
     Ok(asset.id)
 }
 
-async fn handle_post(
-    server: &str,
-    auth: AuthInterceptor,
+/// Fields for the `post` subcommand, bundled so the handler stays under
+/// clippy's argument-count limit.
+struct PostArgs {
     to: Vec<String>,
     video: Option<PathBuf>,
     images: Vec<PathBuf>,
@@ -860,7 +883,18 @@ async fn handle_post(
     description: String,
     tags: Vec<String>,
     privacy: String,
-) -> anyhow::Result<()> {
+}
+
+async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> anyhow::Result<()> {
+    let PostArgs {
+        to,
+        video,
+        images,
+        title,
+        description,
+        tags,
+        privacy,
+    } = args;
     if to.is_empty() {
         anyhow::bail!("--to is required");
     }
@@ -884,7 +918,10 @@ async fn handle_post(
 
     let mut account_ids: Vec<String> = Vec::new();
     for p in &target_platforms {
-        let matching: Vec<&_> = accounts.iter().filter(|a| a.platform == *p as i32).collect();
+        let matching: Vec<&_> = accounts
+            .iter()
+            .filter(|a| a.platform == *p as i32)
+            .collect();
         if matching.is_empty() {
             anyhow::bail!(
                 "no connected account for platform {p:?}. \
@@ -953,8 +990,7 @@ async fn handle_post(
     let jobs = resp.into_inner().jobs;
 
     for job in jobs {
-        let state =
-            multipost_proto::common::JobState::try_from(job.state).unwrap_or_default();
+        let state = multipost_proto::common::JobState::try_from(job.state).unwrap_or_default();
         println!("\nJob {}", job.id);
         println!("  account_id:  {}", job.account_id);
         println!("  state:       {state:?}");
@@ -972,11 +1008,19 @@ async fn handle_post(
 }
 
 fn fmt_i(v: i64) -> String {
-    if v < 0 { "—".to_string() } else { v.to_string() }
+    if v < 0 {
+        "—".to_string()
+    } else {
+        v.to_string()
+    }
 }
 
 fn fmt_f(v: f64) -> String {
-    if v < 0.0 { "—".to_string() } else { format!("{v:.2}") }
+    if v < 0.0 {
+        "—".to_string()
+    } else {
+        format!("{v:.2}")
+    }
 }
 
 fn fmt_ts(secs: i64) -> String {
@@ -990,7 +1034,11 @@ fn print_account(a: Option<&ProtoAccountStats>) {
         println!("(no account stats)");
         return;
     };
-    let when = a.captured_at.as_ref().map(|t| fmt_ts(t.seconds)).unwrap_or_default();
+    let when = a
+        .captured_at
+        .as_ref()
+        .map(|t| fmt_ts(t.seconds))
+        .unwrap_or_default();
     println!("\nAccount stats [{}] @ {}", a.platform, when);
     println!("  followers:          {}", fmt_i(a.followers));
     println!("  following:          {}", fmt_i(a.following));
@@ -1009,7 +1057,15 @@ fn print_posts(posts: &[ProtoPostStats]) {
         "type", "id", "impr", "reads", "likes", "cmt", "shares", "bm"
     );
     for p in posts {
-        let id_tail: String = p.post_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        let id_tail: String = p
+            .post_id
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let title: String = p.title.chars().take(30).collect();
         println!(
             "  {:<6} …{:<7} {:>8} {:>7} {:>6} {:>5} {:>6} {:>5}  {}",
@@ -1032,12 +1088,20 @@ async fn handle_stats(
     action: StatsAction,
 ) -> anyhow::Result<()> {
     match action {
-        StatsAction::Collect { platform, max_posts } => {
+        StatsAction::Collect {
+            platform,
+            max_posts,
+        } => {
             let account_id = resolve_account_id(server, auth.clone(), &platform).await?;
-            println!("Collecting {platform} stats (up to {max_posts} posts) — this drives the browser, may take a bit…");
+            println!(
+                "Collecting {platform} stats (up to {max_posts} posts) — this drives the browser, may take a bit…"
+            );
             let mut client = build_stats(server, auth).await?;
             let snap = client
-                .collect(CollectStatsRequest { account_id, max_posts })
+                .collect(CollectStatsRequest {
+                    account_id,
+                    max_posts,
+                })
                 .await
                 .context("Stats.Collect rpc")?
                 .into_inner();
@@ -1096,8 +1160,7 @@ async fn handle_jobs_list(server: &str, auth: AuthInterceptor, limit: u32) -> an
         return Ok(());
     }
     for job in jobs {
-        let state =
-            multipost_proto::common::JobState::try_from(job.state).unwrap_or_default();
+        let state = multipost_proto::common::JobState::try_from(job.state).unwrap_or_default();
         println!(
             "{}  {state:?}  account={}  external_id={}",
             job.id, job.account_id, job.external_id
@@ -1140,11 +1203,7 @@ async fn handle_get_job(
     Ok(())
 }
 
-async fn handle_watch(
-    server: &str,
-    auth: AuthInterceptor,
-    job_id: String,
-) -> anyhow::Result<()> {
+async fn handle_watch(server: &str, auth: AuthInterceptor, job_id: String) -> anyhow::Result<()> {
     use tokio_stream::StreamExt;
     let mut client = build_posts(server, auth).await?;
     let mut stream = client
@@ -1156,8 +1215,8 @@ async fn handle_watch(
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ev) => {
-                let state = multipost_proto::common::JobState::try_from(ev.state)
-                    .unwrap_or_default();
+                let state =
+                    multipost_proto::common::JobState::try_from(ev.state).unwrap_or_default();
                 let at = ev
                     .at
                     .as_ref()
@@ -1178,19 +1237,14 @@ async fn handle_watch(
     Ok(())
 }
 
-async fn handle_cancel(
-    server: &str,
-    auth: AuthInterceptor,
-    job_id: String,
-) -> anyhow::Result<()> {
+async fn handle_cancel(server: &str, auth: AuthInterceptor, job_id: String) -> anyhow::Result<()> {
     let mut client = build_posts(server, auth).await?;
     let resp = client
         .cancel(JobRef { id: job_id.clone() })
         .await
         .context("Posts.Cancel rpc")?
         .into_inner();
-    let state =
-        multipost_proto::common::JobState::try_from(resp.state).unwrap_or_default();
+    let state = multipost_proto::common::JobState::try_from(resp.state).unwrap_or_default();
     println!("✓ cancelled");
     println!("  id:     {}", resp.id);
     println!("  state:  {state:?}");

@@ -121,7 +121,14 @@ fn decode_item(raw: &Value, captured_at: DateTime<Utc>) -> Option<DiscoveredItem
         .unwrap_or(captured_at);
 
     let mut metadata: HashMap<String, Value> = HashMap::new();
-    for key in ["cell_type", "tag", "tip", "abstract", "behot_time", "group_id"] {
+    for key in [
+        "cell_type",
+        "tag",
+        "tip",
+        "abstract",
+        "behot_time",
+        "group_id",
+    ] {
         if let Some(v) = raw.get(key) {
             metadata.insert(key.to_string(), v.clone());
         }
@@ -141,10 +148,7 @@ fn decode_item(raw: &Value, captured_at: DateTime<Utc>) -> Option<DiscoveredItem
 }
 
 fn str_or_empty(v: &Value, key: &str) -> String {
-    v.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
+    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 fn i64_field(v: &Value, key: &str) -> Option<i64> {
@@ -156,7 +160,9 @@ mod tests {
     use super::*;
 
     fn now() -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(1_700_000_000_000).single().unwrap()
+        Utc.timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .unwrap()
     }
 
     #[test]

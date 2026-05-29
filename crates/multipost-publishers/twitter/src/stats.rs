@@ -174,7 +174,12 @@ async fn scrape_posts(
                 }
                 let mut p = PostStats::new(Platform::Twitter, id, now);
                 p.post_type = "tweet".to_string();
-                p.title = entry["text"].as_str().unwrap_or("").chars().take(140).collect();
+                p.title = entry["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(140)
+                    .collect();
                 p.created_at = entry["time"]
                     .as_str()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -201,7 +206,7 @@ async fn scrape_posts(
     // Newest first (the timeline is roughly reverse-chronological already,
     // but sort defensively by created_at desc).
     let mut posts: Vec<PostStats> = by_id.into_values().collect();
-    posts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    posts.sort_by_key(|p| std::cmp::Reverse(p.created_at));
     posts.truncate(max_posts);
     Ok(posts)
 }
@@ -248,7 +253,7 @@ fn apply_aria_metrics(p: &mut PostStats, aria: &str) {
 /// abbreviated ("1.2K", "3M", "2B"). Leading token of a longer string is
 /// used, so "1,234 Followers" → 1234.
 fn parse_count_abbrev(s: &str) -> Option<i64> {
-    let token = s.trim().split_whitespace().next()?.trim();
+    let token = s.split_whitespace().next()?.trim();
     let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != ',');
     if token.is_empty() {
         return None;
@@ -285,7 +290,10 @@ mod tests {
         let mut p = PostStats::new(Platform::Twitter, "1".into(), Utc::now());
 
         // Act
-        apply_aria_metrics(&mut p, "12 replies, 3 reposts, 88 likes, 4 bookmarks, 5039 views");
+        apply_aria_metrics(
+            &mut p,
+            "12 replies, 3 reposts, 88 likes, 4 bookmarks, 5039 views",
+        );
 
         // Assert
         assert_eq!(p.comments, Some(12));
@@ -320,6 +328,9 @@ mod tests {
             Some("1866453723837443".to_string())
         );
         assert_eq!(own_status_id("/someoneelse/status/123", "cawyuacx"), None);
-        assert_eq!(own_status_id("/cawyuacx/status/123/photo/1", "cawyuacx"), Some("123".into()));
+        assert_eq!(
+            own_status_id("/cawyuacx/status/123/photo/1", "cawyuacx"),
+            Some("123".into())
+        );
     }
 }

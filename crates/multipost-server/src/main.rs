@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use tonic::transport::Server;
-use tracing::{info, Level};
+use tracing::{Level, info};
 
 use multipost_core::Platform;
 use multipost_crawlers_toutiao::ToutiaoCrawler;
@@ -71,10 +71,10 @@ fn load_youtube_oauth() -> Option<OAuthCredentials> {
 }
 
 fn expand_path(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(p)
 }
@@ -185,8 +185,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Toutiao + Twitter stats collectors registered");
 
     let stats = Arc::new(
-        SqliteStatsRepository::open(data_dir.join("stats.sqlite"))
-            .context("open stats.sqlite")?,
+        SqliteStatsRepository::open(data_dir.join("stats.sqlite")).context("open stats.sqlite")?,
     );
 
     let app_state = Arc::new(AppState::new(
@@ -221,7 +220,10 @@ async fn main() -> anyhow::Result<()> {
     let http_task = tokio::spawn(async move {
         let app = axum::Router::new()
             .route("/healthz", axum::routing::get(healthz))
-            .route("/oauth/callback/:platform", axum::routing::get(oauth_callback));
+            .route(
+                "/oauth/callback/:platform",
+                axum::routing::get(oauth_callback),
+            );
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
         info!(addr = %http_addr, "HTTP listener bound");
         axum::serve(listener, app).await?;
@@ -231,10 +233,22 @@ async fn main() -> anyhow::Result<()> {
     info!(addr = %args.grpc_addr, "gRPC listener bound");
     let shutdown = shutdown_signal();
     Server::builder()
-        .add_service(AccountsServer::with_interceptor(accounts_svc, interceptor.clone()))
-        .add_service(MediaServer::with_interceptor(media_svc, interceptor.clone()))
-        .add_service(PostsServer::with_interceptor(posts_svc, interceptor.clone()))
-        .add_service(CrawlServer::with_interceptor(crawl_svc, interceptor.clone()))
+        .add_service(AccountsServer::with_interceptor(
+            accounts_svc,
+            interceptor.clone(),
+        ))
+        .add_service(MediaServer::with_interceptor(
+            media_svc,
+            interceptor.clone(),
+        ))
+        .add_service(PostsServer::with_interceptor(
+            posts_svc,
+            interceptor.clone(),
+        ))
+        .add_service(CrawlServer::with_interceptor(
+            crawl_svc,
+            interceptor.clone(),
+        ))
         .add_service(StatsServer::with_interceptor(stats_svc, interceptor))
         .serve_with_shutdown(args.grpc_addr, shutdown)
         .await
@@ -256,7 +270,9 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
             sig.recv().await;
         }
     };
@@ -289,7 +305,10 @@ async fn recover_confirming_jobs(state: &std::sync::Arc<AppState>) {
         info!("startup recovery: no Confirming jobs to resume");
         return;
     }
-    info!(count = jobs.len(), "startup recovery: re-attaching confirm-poll tasks");
+    info!(
+        count = jobs.len(),
+        "startup recovery: re-attaching confirm-poll tasks"
+    );
     for job in jobs {
         let tenant_id = job.user_id;
         let job_id = job.id;
@@ -337,7 +356,10 @@ async fn recover_confirming_jobs(state: &std::sync::Arc<AppState>) {
 /// Any task still running when the deadline elapses is aborted.
 async fn drain_confirm_tasks(state: &std::sync::Arc<AppState>, deadline: std::time::Duration) {
     let handles: Vec<tokio::task::JoinHandle<()>> = {
-        let mut t = state.confirm_tasks.lock().expect("confirm_tasks mutex poisoned");
+        let mut t = state
+            .confirm_tasks
+            .lock()
+            .expect("confirm_tasks mutex poisoned");
         t.drain().map(|(_, h)| h).collect()
     };
     let n = handles.len();
@@ -345,7 +367,11 @@ async fn drain_confirm_tasks(state: &std::sync::Arc<AppState>, deadline: std::ti
         info!("no confirm tasks in flight");
         return;
     }
-    info!(in_flight = n, deadline_secs = deadline.as_secs(), "draining confirm tasks");
+    info!(
+        in_flight = n,
+        deadline_secs = deadline.as_secs(),
+        "draining confirm tasks"
+    );
     // Wait all, with a single global deadline.
     let drain = async {
         for h in handles {

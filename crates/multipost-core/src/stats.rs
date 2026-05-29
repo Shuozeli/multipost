@@ -4,7 +4,7 @@
 //! A [`StatsCollector`] drives the *logged-in* creator dashboard / profile
 //! of a connected account and returns a [`StatsSnapshot`]: account-level
 //! totals (followers, income, views) plus per-post metrics for the user's
-//! own posts. This is strictly richer than what a [`Crawler`] sees on the
+//! own posts. This is strictly richer than what a [`Crawler`](crate::Crawler) sees on the
 //! public recommendation feed — the owner's dashboard exposes impressions
 //! (展现), reads (阅读), income, and follower trends that the feed never does.
 //!

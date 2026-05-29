@@ -24,8 +24,7 @@ pub const POST_BUTTON: &str = r#"[data-testid="tweetButtonInline"]"#;
 pub const LOGGED_IN_URL_SIGNATURES: &[&str] = &["x.com/home", "x.com/i/"];
 
 /// URL signatures indicating Twitter punted us to login / re-auth.
-pub const LOGIN_URL_SIGNATURES: &[&str] =
-    &["/i/flow/login", "/login", "/i/flow/signup"];
+pub const LOGIN_URL_SIGNATURES: &[&str] = &["/i/flow/login", "/login", "/i/flow/signup"];
 
 /// Per-tweet "more" menu trigger on a timeline article. Opens the menu
 /// with Delete + a few other items. Each tweet has its own caret.

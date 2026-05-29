@@ -19,8 +19,7 @@ use multipost_proto::common::JobState as ProtoJobState;
 use multipost_proto::posts::posts_server::Posts as PostsTrait;
 use multipost_proto::posts::{
     Content as ProtoContent, GetJobRequest, Job as ProtoJob, JobEvent, JobRef, ListJobsRequest,
-    ListJobsResponse,
-    SubmitRequest, SubmitResponse,
+    ListJobsResponse, SubmitRequest, SubmitResponse,
 };
 use multipost_storage::accounts::AccountRecord;
 use multipost_storage::jobs::JobRecord;
@@ -107,7 +106,7 @@ fn infer_content_kind(media_count: usize, mime: Option<&str>, text: &str) -> Con
         } else {
             ContentKind::Text
         }
-    } else if mime.map_or(false, |m| m.starts_with("video/")) {
+    } else if mime.is_some_and(|m| m.starts_with("video/")) {
         ContentKind::LongVideo
     } else {
         ContentKind::Image
@@ -123,9 +122,7 @@ fn looks_like_article(text: &str) -> bool {
     };
     let title = &text[..idx];
     let body = &text[idx + 2..];
-    !title.is_empty()
-        && title.chars().count() <= 200
-        && !body.trim().is_empty()
+    !title.is_empty() && title.chars().count() <= 200 && !body.trim().is_empty()
 }
 
 fn build_content_from_proto(
@@ -134,11 +131,7 @@ fn build_content_from_proto(
     media_count: usize,
     mime_hint: Option<&str>,
 ) -> Content {
-    let media_ids: Vec<Uuid> = p
-        .media_ids
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let media_ids: Vec<Uuid> = p.media_ids.iter().filter_map(|s| s.parse().ok()).collect();
     Content {
         id: Uuid::new_v4(),
         user_id,
@@ -149,9 +142,9 @@ fn build_content_from_proto(
             .into_iter()
             .map(multipost_core::MediaRef)
             .collect(),
-        schedule_at: p.schedule_at.and_then(|ts| {
-            chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-        }),
+        schedule_at: p
+            .schedule_at
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)),
         visibility: proto_visibility(p.visibility),
         overrides: Default::default(),
         created_at: Utc::now(),
@@ -211,7 +204,11 @@ impl PostsTrait for PostsService {
             media_payloads.len(),
             first_mime.as_deref(),
         );
-        content.media = media_ids.iter().copied().map(multipost_core::MediaRef).collect();
+        content.media = media_ids
+            .iter()
+            .copied()
+            .map(multipost_core::MediaRef)
+            .collect();
 
         let mut out = Vec::with_capacity(r.account_ids.len());
         for acc_str in r.account_ids {
@@ -268,10 +265,9 @@ impl PostsTrait for PostsService {
     async fn get_job(&self, req: Request<GetJobRequest>) -> Result<Response<ProtoJob>, Status> {
         let tenant_id = tenant_id_from_request(&req)?;
         let r = req.into_inner();
-        let id: Uuid = r
-            .id
-            .parse()
-            .map_err(|_| Status::invalid_argument("id not a UUID"))?;
+        let id: Uuid =
+            r.id.parse()
+                .map_err(|_| Status::invalid_argument("id not a UUID"))?;
         // Cap server-side so a misbehaving caller can't tie up a
         // connection forever.
         let wait = r.wait_seconds.clamp(0, MAX_LONG_POLL_SECS as i32) as u64;
@@ -560,14 +556,16 @@ impl PostsService {
 
         self.transition(job, JobState::Validating).await;
         let caps = publisher.capabilities();
-        if let Some(max) = caps.max_text_chars {
-            if content.text.chars().count() > max {
-                self.fail(job, &format!("text exceeds {max} chars")).await;
-                return None;
-            }
+        if let Some(max) = caps.max_text_chars
+            && content.text.chars().count() > max
+        {
+            self.fail(job, &format!("text exceeds {max} chars")).await;
+            return None;
         }
-        if matches!(content.kind, ContentKind::LongVideo | ContentKind::ShortVideo)
-            && !caps.video_supported
+        if matches!(
+            content.kind,
+            ContentKind::LongVideo | ContentKind::ShortVideo
+        ) && !caps.video_supported
         {
             self.fail(job, "platform does not support video").await;
             return None;
@@ -579,7 +577,8 @@ impl PostsService {
                 updated.credentials = new_creds.clone();
                 updated.last_used_at = Utc::now();
                 if let Err(e) = self.state.accounts.upsert(updated).await {
-                    self.fail(job, &format!("persist refreshed creds: {e}")).await;
+                    self.fail(job, &format!("persist refreshed creds: {e}"))
+                        .await;
                     return None;
                 }
                 tracing::info!(account_id = %account_id, "refreshed credentials");
@@ -610,7 +609,8 @@ impl PostsService {
                 return None;
             }
             Ok(other) => {
-                self.fail(job, &format!("auth not active: {:?}", other)).await;
+                self.fail(job, &format!("auth not active: {:?}", other))
+                    .await;
                 return None;
             }
             Err(e) => {
@@ -676,7 +676,10 @@ impl PostsService {
 pub fn _link_account_record(_: &AccountRecord) {}
 
 fn is_terminal(s: JobState) -> bool {
-    matches!(s, JobState::Confirmed | JobState::Failed | JobState::Cancelled)
+    matches!(
+        s,
+        JobState::Confirmed | JobState::Failed | JobState::Cancelled
+    )
 }
 
 /// §22.5 content-hash. Deterministic across processes — we feed the
@@ -741,9 +744,8 @@ fn job_record_to_event(job: &JobRecord, detail: &str) -> JobEvent {
 
 /// An empty Watch stream — used when the caller hangs up before the
 /// first event lands.
-fn empty_stream() -> std::pin::Pin<
-    Box<dyn tokio_stream::Stream<Item = Result<JobEvent, Status>> + Send + 'static>,
-> {
+fn empty_stream()
+-> std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<JobEvent, Status>> + Send + 'static>> {
     Box::pin(tokio_stream::empty())
 }
 

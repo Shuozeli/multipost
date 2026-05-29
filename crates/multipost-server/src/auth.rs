@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use multipost_storage::tenants::{hash_key, FileBackedTenantRepository};
+use multipost_storage::tenants::{FileBackedTenantRepository, hash_key};
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
 use uuid::Uuid;
@@ -83,7 +83,5 @@ pub fn tenant_id_from_request<T>(req: &Request<T>) -> Result<Uuid, Status> {
     req.extensions()
         .get::<TenantContext>()
         .map(|c| c.tenant_id)
-        .ok_or_else(|| {
-            Status::internal("TenantContext missing — AuthInterceptor not wired")
-        })
+        .ok_or_else(|| Status::internal("TenantContext missing — AuthInterceptor not wired"))
 }

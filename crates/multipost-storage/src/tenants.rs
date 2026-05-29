@@ -163,7 +163,10 @@ impl FileBackedTenantRepository {
         let plaintext = mint_key();
         let hash = hash_key(&plaintext);
         let mut state = self.state.lock().expect("tenant-store mutex poisoned");
-        let rec = state.tenants.get_mut(&id).ok_or(TenantError::NotFound(id))?;
+        let rec = state
+            .tenants
+            .get_mut(&id)
+            .ok_or(TenantError::NotFound(id))?;
         rec.key_hashes.push(hash);
         rec.updated_at = Utc::now();
         self.save(&state)?;
@@ -174,7 +177,10 @@ impl FileBackedTenantRepository {
     /// remaining key (which would orphan the tenant — add a replacement first).
     pub fn revoke_key(&self, id: Uuid, hash_prefix: &str) -> TenantResult<()> {
         let mut state = self.state.lock().expect("tenant-store mutex poisoned");
-        let rec = state.tenants.get_mut(&id).ok_or(TenantError::NotFound(id))?;
+        let rec = state
+            .tenants
+            .get_mut(&id)
+            .ok_or(TenantError::NotFound(id))?;
         let matches: Vec<usize> = rec
             .key_hashes
             .iter()
@@ -252,8 +258,7 @@ fn mint_key() -> String {
 
 /// Tiny base64url encoder so we don't pull in `base64` for one call site.
 fn base64_url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     let chunks = bytes.chunks_exact(3);
     let rem = chunks.remainder();

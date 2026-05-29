@@ -12,8 +12,7 @@ pub const FILE_INPUT: &str = r#"input[type="file"]"#;
 /// "填写作品标题，为作品获得更多流量". Several other inputs share the
 /// `semi-input` class (售价, 付费视频标题, …), so we disambiguate by
 /// the title placeholder substring.
-pub const TITLE_INPUT: &str =
-    r#"input.semi-input.semi-input-default[placeholder*="填写作品标题"]"#;
+pub const TITLE_INPUT: &str = r#"input.semi-input.semi-input-default[placeholder*="填写作品标题"]"#;
 
 /// Description / caption rich-text editor. ProseMirror under the hood;
 /// supports `#hashtags` and `@mentions` inline. Char limit 1000.
@@ -40,8 +39,11 @@ pub const TOOLTIP_DISMISS_LABELS: &[&str] = &["我知道了", "知道了", "关�
 /// URL signatures that signal a logged-in creator center session.
 /// Used by `check_auth` to verify the Chrome profile still has a valid
 /// Douyin login.
-pub const LOGGED_IN_URL_SIGNATURES: &[&str] =
-    &["/creator-micro/home", "/creator-micro/content", "/creator-micro/data"];
+pub const LOGGED_IN_URL_SIGNATURES: &[&str] = &[
+    "/creator-micro/home",
+    "/creator-micro/content",
+    "/creator-micro/data",
+];
 
 /// Works-management page. `confirm` / `delete` open a fresh tab here.
 pub const MANAGE_URL: &str = "https://creator.douyin.com/creator-micro/content/manage";

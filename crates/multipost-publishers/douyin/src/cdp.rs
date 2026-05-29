@@ -7,10 +7,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Deserialize)]
@@ -28,8 +28,12 @@ struct JsonVersion {
 /// machine — we rewrite it to match the host/port of `http_url`.
 pub async fn resolve_ws_url(http_url: &str) -> Result<String> {
     let parsed = url::Url::parse(http_url).context("parse cdp_url")?;
-    let host = parsed.host_str().ok_or_else(|| anyhow!("cdp_url has no host"))?;
-    let port = parsed.port().ok_or_else(|| anyhow!("cdp_url has no explicit port"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("cdp_url has no host"))?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| anyhow!("cdp_url has no explicit port"))?;
     let info = reqwest::get(format!("{http_url}/json/version"))
         .await
         .context("GET /json/version")?
@@ -194,8 +198,8 @@ impl PageSession {
                 Message::Close(_) => return Err(anyhow!("ws closed by peer")),
                 _ => continue,
             };
-            let v: Value = serde_json::from_str(&text)
-                .with_context(|| format!("parse reply: {text}"))?;
+            let v: Value =
+                serde_json::from_str(&text).with_context(|| format!("parse reply: {text}"))?;
             if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
                 if let Some(err) = v.get("error") {
                     return Err(anyhow!("cdp {method} error: {err}"));

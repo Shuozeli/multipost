@@ -162,7 +162,7 @@ impl AccountRepository for FileBackedAccountRepository {
             .accounts
             .values()
             .filter(|a| a.user_id == user_id)
-            .filter(|a| platform.map_or(true, |p| a.platform == p))
+            .filter(|a| platform.is_none_or(|p| a.platform == p))
             .cloned()
             .collect())
     }
@@ -184,11 +184,11 @@ impl AccountRepository for FileBackedAccountRepository {
 
     async fn delete(&self, user_id: Uuid, id: Uuid) -> AccountResult<()> {
         let mut state = self.state.lock().expect("account-store mutex poisoned");
-        if let Some(a) = state.accounts.get(&id) {
-            if a.user_id == user_id {
-                state.accounts.remove(&id);
-                self.save(&state)?;
-            }
+        if let Some(a) = state.accounts.get(&id)
+            && a.user_id == user_id
+        {
+            state.accounts.remove(&id);
+            self.save(&state)?;
         }
         Ok(())
     }

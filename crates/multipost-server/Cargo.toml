@@ -7,6 +7,12 @@ license.workspace = true
 authors.workspace = true
 description = "multipost gRPC server + OAuth callback HTTP listener."
 
+[lints.clippy]
+# Every gRPC handler returns `Result<_, tonic::Status>`, and `Status` is a
+# large type we cannot box — the tonic service traits require this exact
+# signature. `result_large_err` is therefore not actionable in this crate.
+result_large_err = "allow"
+
 [[bin]]
 name = "multipost-server"
 path = "src/main.rs"

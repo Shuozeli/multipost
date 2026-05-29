@@ -17,7 +17,7 @@ use multipost_proto::common::Platform as ProtoPlatform;
 use multipost_publishers_douyin::DouyinCredentials;
 use multipost_publishers_toutiao::ToutiaoCredentials;
 use multipost_publishers_twitter::TwitterCredentials;
-use multipost_publishers_wx_gzh::{check_account_info, ensure_access_token, WxGzhCredentials};
+use multipost_publishers_wx_gzh::{WxGzhCredentials, check_account_info, ensure_access_token};
 use multipost_publishers_youtube::{exchange_code, start_oauth_url};
 use multipost_storage::accounts::AccountRecord;
 
@@ -102,7 +102,8 @@ impl Accounts for AccountsService {
         let tenant_id = tenant_id_from_request(&req)?;
         let r = req.into_inner();
         let platform = proto_to_core(
-            ProtoPlatform::try_from(r.platform).map_err(|_| Status::invalid_argument("bad platform"))?
+            ProtoPlatform::try_from(r.platform)
+                .map_err(|_| Status::invalid_argument("bad platform"))?,
         )?;
 
         let pending_id = Uuid::new_v4();
@@ -110,14 +111,11 @@ impl Accounts for AccountsService {
 
         match platform {
             Platform::YouTube => {
-                let creds = self
-                    .state
-                    .oauth
-                    .youtube
-                    .as_ref()
-                    .ok_or_else(|| Status::failed_precondition(
-                        "YouTube OAuth not configured: set MULTIPOST_YOUTUBE_CLIENT_ID etc."
-                    ))?;
+                let creds = self.state.oauth.youtube.as_ref().ok_or_else(|| {
+                    Status::failed_precondition(
+                        "YouTube OAuth not configured: set MULTIPOST_YOUTUBE_CLIENT_ID etc.",
+                    )
+                })?;
                 let url = start_oauth_url(creds, &state_token)
                     .map_err(|e| Status::internal(format!("build oauth url: {e}")))?;
 
@@ -182,19 +180,19 @@ impl Accounts for AccountsService {
         let code = match r.completion {
             Some(complete_auth_request::Completion::Code(c)) => c,
             Some(complete_auth_request::Completion::BrowserLoggedIn(_)) => {
-                return Err(Status::unimplemented("browser-login completion is for Phase 3"));
+                return Err(Status::unimplemented(
+                    "browser-login completion is for Phase 3",
+                ));
             }
             None => return Err(Status::invalid_argument("missing completion oneof")),
         };
 
         match pending.platform {
             Platform::YouTube => {
-                let creds = self
-                    .state
-                    .oauth
-                    .youtube
-                    .as_ref()
-                    .ok_or_else(|| Status::failed_precondition("YouTube OAuth not configured"))?;
+                let creds =
+                    self.state.oauth.youtube.as_ref().ok_or_else(|| {
+                        Status::failed_precondition("YouTube OAuth not configured")
+                    })?;
                 let tokens = exchange_code(&self.state.http, creds, &code)
                     .await
                     .map_err(|e| Status::internal(format!("token exchange: {e}")))?;
@@ -203,7 +201,10 @@ impl Accounts for AccountsService {
                 let chan = self
                     .state
                     .http
-                    .get(format!("{}/channels", multipost_publishers_youtube::API_BASE))
+                    .get(format!(
+                        "{}/channels",
+                        multipost_publishers_youtube::API_BASE
+                    ))
                     .query(&[("part", "snippet"), ("mine", "true")])
                     .bearer_auth(&tokens.access_token)
                     .send()
@@ -220,7 +221,11 @@ impl Accounts for AccountsService {
                     .cloned();
                 let (external_id, display_name) = match first {
                     Some(c) => {
-                        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let id = c
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let title = c
                             .get("snippet")
                             .and_then(|s| s.get("title"))
@@ -256,7 +261,9 @@ impl Accounts for AccountsService {
                     .map_err(|e| Status::internal(format!("persist account: {e}")))?;
                 Ok(Response::new(record_to_proto(&record)))
             }
-            _ => Err(Status::unimplemented("non-YouTube CompleteAuth lands later")),
+            _ => Err(Status::unimplemented(
+                "non-YouTube CompleteAuth lands later",
+            )),
         }
     }
 
@@ -321,7 +328,9 @@ impl Accounts for AccountsService {
         &self,
         _req: Request<CheckAuthRequest>,
     ) -> Result<Response<CheckAuthResponse>, Status> {
-        Err(Status::unimplemented("CheckAuth implementation lands in Phase 1b"))
+        Err(Status::unimplemented(
+            "CheckAuth implementation lands in Phase 1b",
+        ))
     }
 
     async fn register_developer_credentials(
@@ -355,14 +364,11 @@ impl Accounts for AccountsService {
                 if let Some(updated) = refreshed {
                     creds = updated;
                 }
-                let info =
-                    check_account_info(&self.state.http, &creds.access_token)
-                        .await
-                        .map_err(|e| {
-                            Status::failed_precondition(format!(
-                                "wx-gzh validation failed: {e}"
-                            ))
-                        })?;
+                let info = check_account_info(&self.state.http, &creds.access_token)
+                    .await
+                    .map_err(|e| {
+                        Status::failed_precondition(format!("wx-gzh validation failed: {e}"))
+                    })?;
 
                 let now = Utc::now();
                 let display_name = info
@@ -376,9 +382,8 @@ impl Accounts for AccountsService {
                     display_name,
                     external_id: info.appid.clone(),
                     auth_status: AuthStatus::Active,
-                    credentials: serde_json::to_value(&creds).map_err(|e| {
-                        Status::internal(format!("serialize wx-gzh creds: {e}"))
-                    })?,
+                    credentials: serde_json::to_value(&creds)
+                        .map_err(|e| Status::internal(format!("serialize wx-gzh creds: {e}")))?,
                     created_at: now,
                     last_used_at: now,
                 };
@@ -394,8 +399,8 @@ impl Accounts for AccountsService {
             Platform::Douyin => {
                 // Douyin credentials are just the CDP URL of the Chrome
                 // profile that's logged into creator.douyin.com.
-                let creds: DouyinCredentials = serde_json::from_str(&r.credentials_json)
-                    .map_err(|e| {
+                let creds: DouyinCredentials =
+                    serde_json::from_str(&r.credentials_json).map_err(|e| {
                         Status::invalid_argument(format!(
                             "credentials_json must be {{cdp_url}}: {e}"
                         ))
@@ -409,18 +414,18 @@ impl Accounts for AccountsService {
                     .get(&Platform::Douyin)
                     .cloned()
                     .ok_or_else(|| Status::internal("douyin publisher not registered"))?;
-                let probe_creds = serde_json::to_value(&creds).map_err(|e| {
-                    Status::internal(format!("serialize douyin creds: {e}"))
-                })?;
+                let probe_creds = serde_json::to_value(&creds)
+                    .map_err(|e| Status::internal(format!("serialize douyin creds: {e}")))?;
                 let probe_ctx = multipost_core::PublishContext {
                     account_id: Uuid::nil(),
                     user_id: tenant_id,
                     credentials: &probe_creds,
                     media: vec![],
                 };
-                let auth = publisher.check_auth(&probe_ctx).await.map_err(|e| {
-                    Status::failed_precondition(format!("douyin check_auth: {e}"))
-                })?;
+                let auth = publisher
+                    .check_auth(&probe_ctx)
+                    .await
+                    .map_err(|e| Status::failed_precondition(format!("douyin check_auth: {e}")))?;
                 if !matches!(auth, AuthStatus::Active) {
                     return Err(Status::failed_precondition(format!(
                         "douyin profile at {} is not logged in (status={:?}). \
@@ -455,8 +460,8 @@ impl Accounts for AccountsService {
             }
             Platform::Toutiao => {
                 // Same shape as Douyin — cdp_url + cached display name + ID.
-                let creds: ToutiaoCredentials = serde_json::from_str(&r.credentials_json)
-                    .map_err(|e| {
+                let creds: ToutiaoCredentials =
+                    serde_json::from_str(&r.credentials_json).map_err(|e| {
                         Status::invalid_argument(format!(
                             "credentials_json must be {{cdp_url, nickname?, toutiao_id?}}: {e}"
                         ))
@@ -478,9 +483,10 @@ impl Accounts for AccountsService {
                     credentials: &probe_creds,
                     media: vec![],
                 };
-                let auth = publisher.check_auth(&probe_ctx).await.map_err(|e| {
-                    Status::failed_precondition(format!("toutiao check_auth: {e}"))
-                })?;
+                let auth = publisher
+                    .check_auth(&probe_ctx)
+                    .await
+                    .map_err(|e| Status::failed_precondition(format!("toutiao check_auth: {e}")))?;
                 if !matches!(auth, AuthStatus::Active) {
                     return Err(Status::failed_precondition(format!(
                         "toutiao profile at {} is not logged in (status={:?}). \
@@ -516,8 +522,8 @@ impl Accounts for AccountsService {
             Platform::Twitter => {
                 // Twitter / X — CDP + handle. Same shape as Toutiao /
                 // Douyin (browser-cookie auth, no token storage).
-                let creds: TwitterCredentials = serde_json::from_str(&r.credentials_json)
-                    .map_err(|e| {
+                let creds: TwitterCredentials =
+                    serde_json::from_str(&r.credentials_json).map_err(|e| {
                         Status::invalid_argument(format!(
                             "credentials_json must be {{cdp_url, handle, display_name?}}: {e}"
                         ))
@@ -542,9 +548,10 @@ impl Accounts for AccountsService {
                     credentials: &probe_creds,
                     media: vec![],
                 };
-                let auth = publisher.check_auth(&probe_ctx).await.map_err(|e| {
-                    Status::failed_precondition(format!("twitter check_auth: {e}"))
-                })?;
+                let auth = publisher
+                    .check_auth(&probe_ctx)
+                    .await
+                    .map_err(|e| Status::failed_precondition(format!("twitter check_auth: {e}")))?;
                 if !matches!(auth, AuthStatus::Active) {
                     return Err(Status::failed_precondition(format!(
                         "twitter profile at {} is not logged in (status={:?}). \

@@ -86,8 +86,8 @@ pub async fn exchange_code(
     if !status.is_success() {
         anyhow::bail!("token exchange failed: HTTP {status} body={body}");
     }
-    let token: TokenResponse = serde_json::from_str(&body)
-        .with_context(|| format!("parse token JSON: {body}"))?;
+    let token: TokenResponse =
+        serde_json::from_str(&body).with_context(|| format!("parse token JSON: {body}"))?;
     Ok(into_tokens(token))
 }
 
@@ -117,8 +117,8 @@ pub async fn refresh_token(
     if !status.is_success() {
         anyhow::bail!("token refresh failed: HTTP {status} body={body}");
     }
-    let token: TokenResponse = serde_json::from_str(&body)
-        .with_context(|| format!("parse refresh JSON: {body}"))?;
+    let token: TokenResponse =
+        serde_json::from_str(&body).with_context(|| format!("parse refresh JSON: {body}"))?;
     let mut out = into_tokens(token);
     if out.refresh_token.is_none() {
         out.refresh_token = Some(refresh.to_string());

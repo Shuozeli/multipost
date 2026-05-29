@@ -8,7 +8,7 @@
 //! current user's ssh-agent / keys / config. We don't accept passwords.
 //! Set up key-based auth (`ssh-copy-id`) on the Chrome host once.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 use tokio::process::Command;
 

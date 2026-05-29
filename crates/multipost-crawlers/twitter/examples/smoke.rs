@@ -4,12 +4,23 @@ use multipost_crawlers_twitter::TwitterCrawler;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let duration: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let opts = CrawlOptions { duration_secs: duration, ..Default::default() };
+    let duration: u64 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let opts = CrawlOptions {
+        duration_secs: duration,
+        ..Default::default()
+    };
     let items = TwitterCrawler::new().run(&opts).await?;
     println!("captured {} tweet(s):", items.len());
     for (i, it) in items.iter().enumerate() {
-        let text = it.body.chars().take(60).collect::<String>().replace('\n', " ");
+        let text = it
+            .body
+            .chars()
+            .take(60)
+            .collect::<String>()
+            .replace('\n', " ");
         println!(
             "  [{:>3}] @{:<18} fav={:>5} rt={:>5} views={:>7} | {}",
             i + 1,
