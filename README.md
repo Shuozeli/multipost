@@ -1,21 +1,41 @@
 # multipost
 
-A pure-Rust gRPC server for **posting content to social media platforms automatically**.
+A pure-Rust gRPC service for **cross-posting to social platforms**, plus
+read-only **content discovery** (crawl) and **profile-stats** collection.
 
-> One sentence: submit a piece of content once → it lands on every platform you've connected.
+> One sentence: submit a piece of content once → it lands on every platform
+> you've connected; pull your own dashboard analytics back.
+
+> Working on this repo as an agent? Start with [`CLAUDE.md`](CLAUDE.md) — it has
+> the crate map, the browser-automation gotchas, and the CI gates.
 
 ## Status
 
-Phase 5 thin-executor design is implemented and exercised end-to-end. The lib supports posting + confirming + deleting on the four target platforms today. The server is a multi-tenant API; downstream callers submit posts via gRPC and either long-poll `GetJob` or open a streaming `Watch` to learn when a job lands.
+Phase 5 thin-executor design is implemented and exercised end-to-end. Write side
+(publish + confirm + delete) covers five platforms; read side adds a recommendation-
+feed **crawler** and an owner-dashboard **stats collector** (both per platform).
+The server is a multi-tenant gRPC API; callers submit posts and either long-poll
+`GetJob` or open a streaming `Watch` to learn when a job lands.
 
-| Platform | Auth | Publish | Confirm | Delete | Tested live |
-|---|---|---|---|---|---|
-| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | Polling | API delete | ✓ |
-| **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | `freepublish/get` (partial) | API delete | ✓ draft path |
-| **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | Polls manage page | Clicks 删除作品 | ✓ |
-| **Toutiao** (头条号) | Chrome profile cookies | Browser-automated article editor | Auto-saved on type | Drafts UI 删除 | ✓ |
+| Platform | Auth | Publish | Images | Confirm | Delete | Tested live |
+|---|---|---|---|---|---|---|
+| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | — | Polling | API delete | ✓ |
+| **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | — | `freepublish/get` (partial) | API delete | ✓ draft path |
+| **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | — | Polls manage page | Clicks 删除作品 | ✓ |
+| **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor (CDP) | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ |
+| **Twitter / X** | Chrome profile cookies | Inline composer (CDP) | ✓ tweet (≤4) | Immediate | caret → Delete | ✓ |
 
-WeChat MP individual subscription accounts: `freepublish/submit` is gated by Tencent's 48001 — drafts land, final publish has to be clicked in MP admin.
+Images on the cookie-auth platforms are streamed into the remote Chrome over CDP
+(no host filesystem access) — see [`CLAUDE.md`](CLAUDE.md). WeChat MP individual
+subscription accounts: `freepublish/submit` is gated by Tencent's 48001 — drafts
+land, final publish has to be clicked in MP admin.
+
+**Read side:**
+
+| Service | Platforms | What it does |
+|---|---|---|
+| **Crawl** | Toutiao, Twitter | Drives `pwright` to capture the public recommendation feed → `DiscoveredItem`s (SQLite). |
+| **Stats** | Toutiao, Twitter | Drives the account's own dashboard → account totals + per-post metrics (展现/阅读/likes/views…), stored as timestamped snapshots. Richer than the feed. |
 
 ## Crate layout
 
@@ -23,15 +43,19 @@ WeChat MP individual subscription accounts: `freepublish/submit` is gated by Ten
 multipost/
 ├── Cargo.toml          workspace
 └── crates/
-    ├── multipost-core         shared types: Publisher trait, Content, Capabilities
+    ├── multipost-core         shared types + 3 traits: Publisher, Crawler, StatsCollector
     ├── multipost-proto        .proto files + tonic-generated bindings
-    ├── multipost-storage      file-backed repositories (accounts, jobs, media, tenants)
+    ├── multipost-storage      JSON repos (accounts/jobs/media/tenants) + SQLite (discovered, stats)
     ├── multipost-orchestrator job state machine types
     ├── multipost-publishers/
     │   ├── youtube            API   (OAuth + resumable upload)
     │   ├── wx-gzh             API   (stable_token + draft/add + freepublish)
     │   ├── douyin             CDP   (SCP staging + DOM.setFileInputFiles)
-    │   └── toutiao            CDP   (execCommand insertText into the editor)
+    │   ├── toutiao            CDP   (editor + 微头条 + images; + stats collector)
+    │   └── twitter            CDP   (inline composer + images; + stats collector)
+    ├── multipost-crawlers/
+    │   ├── toutiao            pwright network-listen → decode 推荐 feed
+    │   └── twitter            pwright network-listen → decode For-You feed
     ├── multipost-server       binary: gRPC + OAuth callback HTTP
     └── multipost-cli          binary: CLI client
 ```
@@ -54,6 +78,15 @@ service Posts {
   rpc Watch    (JobRef)              returns (stream JobEvent);  // streaming alternative
   rpc Cancel   (JobRef)              returns (Job);              // calls publisher.delete()
   rpc ListJobs (ListJobsRequest)     returns (ListJobsResponse);
+}
+service Crawl {                                                 // read-only: public feed
+  rpc Submit (SubmitCrawlRequest) returns (CrawlJob);           // background; poll GetJob
+  rpc GetJob / ListItems
+}
+service Stats {                                                 // read-only: own dashboard
+  rpc Collect         (CollectStatsRequest)   returns (StatsSnapshot);    // drives browser, persists
+  rpc GetAccountStats (GetAccountStatsRequest) returns (AccountStatsSeries); // growth over time
+  rpc ListPostStats   (ListPostStatsRequest)   returns (PostStatsList);   // latest per-post
 }
 ```
 
@@ -83,12 +116,34 @@ export MULTIPOST_API_KEY=<the-key>
 ./target/release/multipost accounts register-wechat \
   --appid wx... --secret <secret>
 
-# 4. Post.
-./target/release/multipost post --to wx-gzh \
-  --title "Hello world" --description "..."
+# 3b. Cookie-auth platforms point at a Chrome already logged into the account.
+./target/release/multipost accounts register-toutiao --cdp-url http://<chrome-host>:<port>
+./target/release/multipost accounts register-twitter --cdp-url http://<chrome-host>:<port> --handle <handle>
+
+# 4. Post. Text, or images (--image is repeatable; mutually exclusive with --video).
+./target/release/multipost post --to wx-gzh --title "Hello world" --description "..."
+./target/release/multipost post --to toutiao,twitter --description "今日速览" --image a.png --image b.jpg
 
 # 5. Watch the job to terminal.
 ./target/release/multipost watch <job-id>
+
+# 6. Read side: crawl the public feed, or collect your own profile stats.
+./target/release/multipost crawl --platform twitter --duration 30
+./target/release/multipost stats collect --platform toutiao --max-posts 100
+./target/release/multipost stats posts   --platform toutiao    # latest per-post numbers
+```
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) gates four jobs on push/PR to `main`:
+Build & Test, Clippy (`-D warnings`), Format (`--check`), Documentation. Run them
+locally before pushing:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo doc --workspace --no-deps
+cargo test --workspace
 ```
 
 For local development, set `MULTIPOST_DEV_NO_AUTH=1` on the server to bypass the API-key check; all requests are then bound to `tenant_id=00000000-0000-0000-0000-000000000000`. Production deploys must not set it.

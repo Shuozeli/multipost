@@ -1,7 +1,20 @@
-<!-- agent-updated: 2026-05-15T16:50:00Z -->
+<!-- agent-updated: 2026-05-29T00:00:00Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
+
+## Recently landed (post-Phase 5, 2026-05)
+
+- [x] **Twitter / X publisher** — inline-composer tweet via CDP, caret→Delete.
+- [x] **Image posting** — Toutiao 微头条 (≤9) + Twitter (≤4); bytes streamed into the
+  remote Chrome over CDP (`DataTransfer` + `atob`, CSP-safe). CLI `post --image`.
+- [x] **Crawl / discovery** — `Crawl` gRPC service + Toutiao/Twitter crawlers
+  (pwright network-listen → `DiscoveredItem` → SQLite); CLI `crawl` / `discovered`.
+- [x] **Profile stats** — `Stats` gRPC service + Toutiao/Twitter collectors;
+  timestamped account + per-post snapshots (SQLite); CLI `stats collect/account/posts`.
+  Toutiao pages the works feed (offset index, dedup by id); Twitter scrapes the profile.
+- [x] **CI** — GitHub Actions: Build & Test / Clippy (-D warnings) / Format / Doc.
+- [x] **CLAUDE.md** — agent onboarding guide.
 
 ## Phase 0 — Foundation
 
