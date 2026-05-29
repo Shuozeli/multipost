@@ -15,6 +15,7 @@
 //! requires the logged-in `visited_uid`, which the dashboard stashes in
 //! `localStorage["__tea_cache_tokens_1231"].user_unique_id`.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -172,10 +173,13 @@ async fn fetch_posts(
     now: DateTime<Utc>,
 ) -> Result<Vec<PostStats>> {
     let mut posts = Vec::new();
+    // Dedup by post_id: `offset` is positional, so if the feed shifts mid-pull
+    // (a post published or deleted between page fetches) a boundary item can
+    // repeat. A stride of PAGE_SIZE keeps the index aligned; the set drops dups.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut offset: i64 = 0;
     while posts.len() < max_posts {
-        let count = PAGE_SIZE.min(max_posts - posts.len());
-        let url = mp_provider_url(uid, offset, count);
+        let url = mp_provider_url(uid, offset, PAGE_SIZE);
         let js = format!(
             r#"(async () => {{
                 const r = await fetch("{url}", {{credentials: 'include'}});
@@ -188,17 +192,21 @@ async fn fetch_posts(
             break;
         }
         for cell in &cells {
-            if let Some(p) = parse_cell(cell, now) {
+            if let Some(p) = parse_cell(cell, now)
+                && seen.insert(p.post_id.clone())
+            {
                 posts.push(p);
+                if posts.len() >= max_posts {
+                    break;
+                }
             }
         }
         // `offset` is a numeric index into the works list (0, 20, 40, …) —
         // NOT the timestamp the response echoes in its own `offset` field.
-        // Advance by the page size we just requested.
         if !v["has_more"].as_bool().unwrap_or(false) {
             break;
         }
-        offset += count as i64;
+        offset += PAGE_SIZE as i64;
     }
     posts.truncate(max_posts);
     Ok(posts)

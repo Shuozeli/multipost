@@ -25,17 +25,22 @@ async fn main() -> anyhow::Result<()> {
     println!("\n=== ACCOUNT ===");
     println!("{:#?}", snap.account);
     println!("\n=== POSTS ({}) ===", snap.posts.len());
-    for p in snap.posts.iter().take(15) {
+    println!(
+        "  {:>3}  {:<7} {:>6} {:>6} {:>5} {:>4} {:>4}  title",
+        "#", "type", "impr", "read", "like", "cmt", "fav"
+    );
+    let fi = |o: Option<i64>| o.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+    for (i, p) in snap.posts.iter().enumerate() {
         println!(
-            "  {} [{}] imp={:?} read={:?} like={:?} cmt={:?} fav={:?} | {}",
-            p.post_id,
+            "  {:>3}  {:<7} {:>6} {:>6} {:>5} {:>4} {:>4}  {}",
+            i + 1,
             p.post_type,
-            p.impressions,
-            p.reads,
-            p.likes,
-            p.comments,
-            p.bookmarks,
-            p.title.chars().take(28).collect::<String>(),
+            fi(p.impressions),
+            fi(p.reads),
+            fi(p.likes),
+            fi(p.comments),
+            fi(p.bookmarks),
+            p.title.chars().take(34).collect::<String>(),
         );
     }
     Ok(())
