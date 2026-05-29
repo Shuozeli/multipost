@@ -687,15 +687,22 @@ async fn insert_weitoutiao_images(
     loop {
         let done = page.evaluate(&probe_js).await?.as_bool().unwrap_or(false);
         if done {
-            tracing::info!(elapsed_ms = start.elapsed().as_millis() as u64,
-                "toutiao 微头条: upload registered (已上传 + 确定 enabled)");
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "toutiao 微头条: upload registered (已上传 + 确定 enabled)"
+            );
             break;
         }
         if start.elapsed() > Duration::from_secs(90) {
-            anyhow::bail!("微头条 image upload did not register within 90s (no 已上传 N / 确定 stayed disabled)");
+            anyhow::bail!(
+                "微头条 image upload did not register within 90s (no 已上传 N / 确定 stayed disabled)"
+            );
         }
-        if start.elapsed().as_secs() % 5 == 0 {
-            tracing::info!(elapsed_s = start.elapsed().as_secs(), "toutiao 微头条: awaiting upload…");
+        if start.elapsed().as_secs().is_multiple_of(5) {
+            tracing::info!(
+                elapsed_s = start.elapsed().as_secs(),
+                "toutiao 微头条: awaiting upload…"
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -750,9 +757,7 @@ async fn insert_weitoutiao_images(
         }
         if start.elapsed() > Duration::from_secs(20) {
             if !clicked {
-                anyhow::bail!(
-                    "微头条 image-insert 确定 never appeared (upload did not register)"
-                );
+                anyhow::bail!("微头条 image-insert 确定 never appeared (upload did not register)");
             }
             anyhow::bail!(
                 "微头条 image-insert 确定 did not commit within 20s (drawer open after trusted clicks)"

@@ -21,14 +21,16 @@ use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cdp = std::env::var("CDP_URL")
-        .unwrap_or_else(|_| "http://alienware-win-yuacx:9402".into());
+    let cdp = std::env::var("CDP_URL").unwrap_or_else(|_| "http://alienware-win-yuacx:9402".into());
     let img = std::env::var("IMG").unwrap_or_else(|_| {
         "/home/cyuan/.multipost/media/b4a57e4b-52a9-406e-8351-c72036bd13cc.jpg".into()
     });
     let fill_body = std::env::var("FILL_BODY").is_ok();
     let bytes = std::fs::read(&img)?;
-    println!("CDP={cdp}\nIMG={img} bytes={} fill_body={fill_body}", bytes.len());
+    println!(
+        "CDP={cdp}\nIMG={img} bytes={} fill_body={fill_body}",
+        bytes.len()
+    );
 
     let session = BrowserSession::connect(&cdp).await?;
 
@@ -55,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     loop {
         let ok = page
-            .evaluate(r#"(() => !!document.querySelector('.ProseMirror[contenteditable="true"]'))()"#)
+            .evaluate(
+                r#"(() => !!document.querySelector('.ProseMirror[contenteditable="true"]'))()"#,
+            )
             .await?
             .as_bool()
             .unwrap_or(false);
@@ -115,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     loop {
         if page
-            .evaluate(r#"(() => !!document.querySelector('input[type="file"][accept*="image"]'))()"#)
+            .evaluate(
+                r#"(() => !!document.querySelector('input[type="file"][accept*="image"]'))()"#,
+            )
             .await?
             .as_bool()
             .unwrap_or(false)
@@ -137,7 +143,6 @@ async fn main() -> anyhow::Result<()> {
 
     // poll the drawer for a REAL upload (已上传 + 确定 enabled)
     let t = Instant::now();
-    let mut registered = false;
     loop {
         let v = page
             .evaluate(
@@ -148,8 +153,10 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         let last = v.as_str().unwrap_or("").to_string();
         if last.contains("\"uploaded\":\"1\"") && last.contains("\"confirm\":true") {
-            println!("UPLOAD REGISTERED after {:.1}s -> {last}", t.elapsed().as_secs_f64());
-            registered = true;
+            println!(
+                "UPLOAD REGISTERED after {:.1}s -> {last}",
+                t.elapsed().as_secs_f64()
+            );
             break;
         }
         if t.elapsed() > Duration::from_secs(25) {
@@ -157,9 +164,6 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    if !registered {
-        return Ok(());
     }
 
     let vp = page
