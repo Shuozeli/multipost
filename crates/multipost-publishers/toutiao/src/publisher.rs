@@ -676,45 +676,65 @@ async fn insert_weitoutiao_images(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // 5. Click 确定 to insert the images into the post. The panel mounts on
-    //    top, so its confirm button is the last visible 确定 on the page.
+    // 5+6. Click 确定 to insert the images, then wait for the drawer to close
+    //       (so the editor regains focus and 发布 is interactable).
+    //
+    //       The confirm button lives in a `position: fixed` byte-design drawer
+    //       (`.mp-ic-img-drawer`). Elements inside a fixed-positioned ancestor
+    //       have `offsetParent === null` even when fully visible, so the old
+    //       `offsetParent !== null` filter either found NO 确定 button
+    //       ("no 确定 button") or matched the wrong visible 确定 elsewhere and
+    //       the drawer never closed. Select by the stable data-e2e attribute
+    //       with a `getClientRects()` visibility check (fixed-safe), and
+    //       re-click each poll until the drawer is actually gone — byte-design
+    //       can swallow the first click while the panel settles.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let confirm_js = r#"(() => {
-        const btns = Array.from(document.querySelectorAll('button'))
-            .filter(b => b.offsetParent !== null && (b.innerText || '').trim() === '确定');
-        if (btns.length === 0) return {ok: false, reason: 'no 确定 button'};
-        btns[btns.length - 1].click();
-        return {ok: true};
+    let click_confirm_js = r#"(() => {
+        const vis = el => !!el && el.getClientRects().length > 0 && !el.disabled;
+        // Stable selector from the live /weitoutiao/publish DOM.
+        let btn = document.querySelector('button[data-e2e="imageUploadConfirm-btn"]');
+        if (!vis(btn)) {
+            // Fallback: a visible 确定 inside the image drawer/panel only.
+            const scope = document.querySelector(
+                '.mp-ic-img-drawer, .upload-image-panel, .upload-handler-drag'
+            ) || document;
+            const cands = Array.from(scope.querySelectorAll('button'))
+                .filter(b => (b.innerText || '').trim() === '确定' && vis(b));
+            btn = cands[cands.length - 1] || null;
+        }
+        if (!vis(btn)) return {found: false};
+        btn.click();
+        return {found: true};
     })()"#;
-    let r = page.evaluate(confirm_js).await?;
-    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        anyhow::bail!("click 确定 (insert images) failed: {r}");
-    }
-    tracing::info!("toutiao 微头条: clicked 确定 to insert images");
-
-    // 6. Wait for the panel to close so the editor regains focus + the
-    //    发布 button is interactable.
+    let drawer_open_js = r#"(() => {
+        const p = document.querySelector(
+            '.mp-ic-img-drawer, .upload-image-panel, .upload-handler-drag'
+        );
+        return !!(p && p.getClientRects().length > 0 && p.getBoundingClientRect().width > 50);
+    })()"#;
+    let mut ever_found = false;
     let start = Instant::now();
     loop {
-        let open = page
-            .evaluate(
-                r#"(() => {
-                    const p = document.querySelector('.upload-image-panel, .upload-handler-drag');
-                    return !!(p && p.getBoundingClientRect().width > 50);
-                })()"#,
-            )
-            .await?
-            .as_bool()
-            .unwrap_or(false);
+        let r = page.evaluate(click_confirm_js).await?;
+        if r.get("found").and_then(|v| v.as_bool()).unwrap_or(false) {
+            ever_found = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let open = page.evaluate(drawer_open_js).await?.as_bool().unwrap_or(false);
         if !open {
             break;
         }
-        if start.elapsed() > Duration::from_secs(15) {
-            anyhow::bail!("微头条 upload panel did not close within 15s after 确定");
+        if start.elapsed() > Duration::from_secs(20) {
+            if !ever_found {
+                anyhow::bail!(
+                    "微头条 image-insert 确定 button never found (drawer still open) — \
+                     selector button[data-e2e=imageUploadConfirm-btn] may have changed"
+                );
+            }
+            anyhow::bail!("微头条 upload drawer did not close within 20s after clicking 确定");
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    tracing::info!("toutiao 微头条: image panel closed");
+    tracing::info!(ever_found, "toutiao 微头条: images inserted, drawer closed");
     Ok(())
 }
 
