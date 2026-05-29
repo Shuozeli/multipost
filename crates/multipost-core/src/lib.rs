@@ -11,6 +11,7 @@ pub mod error;
 pub mod job;
 pub mod platform;
 pub mod publisher;
+pub mod stats;
 
 pub use content::{Content, ContentKind, MediaRef, Visibility};
 pub use discovery::{CrawlOptions, Crawler, DiscoveredItem, DiscoveryMetrics};
@@ -18,3 +19,4 @@ pub use error::{PublishError, Result};
 pub use job::JobState;
 pub use platform::{AuthStatus, Capabilities, Platform};
 pub use publisher::{ConfirmStatus, MediaPayload, PublishContext, PublishHandle, Publisher};
+pub use stats::{AccountStats, PostStats, StatsCollector, StatsOptions, StatsSnapshot};

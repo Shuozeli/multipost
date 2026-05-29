@@ -21,15 +21,17 @@ use multipost_proto::accounts::accounts_server::AccountsServer;
 use multipost_proto::crawl::crawl_server::CrawlServer;
 use multipost_proto::media::media_server::MediaServer;
 use multipost_proto::posts::posts_server::PostsServer;
+use multipost_proto::stats::stats_server::StatsServer;
 use multipost_publishers_douyin::DouyinPublisher;
-use multipost_publishers_toutiao::ToutiaoPublisher;
-use multipost_publishers_twitter::TwitterPublisher;
+use multipost_publishers_toutiao::{ToutiaoPublisher, ToutiaoStatsCollector};
+use multipost_publishers_twitter::{TwitterPublisher, TwitterStatsCollector};
 use multipost_publishers_wx_gzh::WxGzhPublisher;
 use multipost_publishers_youtube::{OAuthCredentials, YouTubePublisher};
 use multipost_storage::accounts::FileBackedAccountRepository;
 use multipost_storage::discovered::SqliteDiscoveredRepository;
 use multipost_storage::jobs::FileBackedJobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
+use multipost_storage::stats::SqliteStatsRepository;
 use multipost_storage::tenants::FileBackedTenantRepository;
 
 use crate::auth::AuthInterceptor;
@@ -37,6 +39,7 @@ use crate::services::accounts::AccountsService;
 use crate::services::crawl::CrawlService;
 use crate::services::media::MediaService;
 use crate::services::posts::PostsService;
+use crate::services::stats::StatsService;
 use crate::state::{AppState, OAuthConfig};
 
 #[derive(Parser, Debug)]
@@ -173,6 +176,19 @@ async fn main() -> anyhow::Result<()> {
             .context("open discovered.sqlite")?,
     );
 
+    // Stats collectors (read-only; drive the account's logged-in Chrome
+    // over CDP). Toutiao + Twitter share the cookie-auth CDP shape.
+    let mut stats_collectors: HashMap<Platform, Arc<dyn multipost_core::StatsCollector>> =
+        HashMap::new();
+    stats_collectors.insert(Platform::Toutiao, Arc::new(ToutiaoStatsCollector::new()));
+    stats_collectors.insert(Platform::Twitter, Arc::new(TwitterStatsCollector::new()));
+    info!("Toutiao + Twitter stats collectors registered");
+
+    let stats = Arc::new(
+        SqliteStatsRepository::open(data_dir.join("stats.sqlite"))
+            .context("open stats.sqlite")?,
+    );
+
     let app_state = Arc::new(AppState::new(
         accounts,
         media.clone(),
@@ -182,12 +198,15 @@ async fn main() -> anyhow::Result<()> {
         oauth,
         crawlers,
         discovered,
+        stats_collectors,
+        stats,
     ));
 
     let accounts_svc = AccountsService::new(app_state.clone());
     let media_svc = MediaService::new(app_state.clone());
     let posts_svc = PostsService::new(app_state.clone());
     let crawl_svc = CrawlService::new(app_state.clone());
+    let stats_svc = StatsService::new(app_state.clone());
 
     // §22.7 startup recovery: re-attach confirm-poll tasks for any
     // Confirming jobs that survived a crash/restart in the last 24h.
@@ -215,7 +234,8 @@ async fn main() -> anyhow::Result<()> {
         .add_service(AccountsServer::with_interceptor(accounts_svc, interceptor.clone()))
         .add_service(MediaServer::with_interceptor(media_svc, interceptor.clone()))
         .add_service(PostsServer::with_interceptor(posts_svc, interceptor.clone()))
-        .add_service(CrawlServer::with_interceptor(crawl_svc, interceptor))
+        .add_service(CrawlServer::with_interceptor(crawl_svc, interceptor.clone()))
+        .add_service(StatsServer::with_interceptor(stats_svc, interceptor))
         .serve_with_shutdown(args.grpc_addr, shutdown)
         .await
         .context("serve grpc")?;

@@ -26,3 +26,8 @@ pub mod media {
 pub mod crawl {
     tonic::include_proto!("crawl");
 }
+
+/// Profile-stats collection service.
+pub mod stats {
+    tonic::include_proto!("stats");
+}

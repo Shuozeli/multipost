@@ -26,6 +26,11 @@ use multipost_proto::media::media_client::MediaClient;
 use multipost_proto::media::{upload_chunk, UploadChunk, UploadMeta};
 use multipost_proto::posts::posts_client::PostsClient;
 use multipost_proto::posts::{Content, GetJobRequest, JobRef, ListJobsRequest, SubmitRequest};
+use multipost_proto::stats::stats_client::StatsClient;
+use multipost_proto::stats::{
+    AccountStats as ProtoAccountStats, CollectStatsRequest, GetAccountStatsRequest,
+    ListPostStatsRequest, PostStats as ProtoPostStats,
+};
 use multipost_storage::tenants::FileBackedTenantRepository;
 
 const UPLOAD_CHUNK: usize = 1 * 1024 * 1024; // 1 MiB
@@ -117,6 +122,13 @@ enum Command {
         #[arg(long, default_value = "30")]
         limit: u32,
     },
+    /// Profile-stats collection for a connected account (followers,
+    /// income, per-post impressions/reads/likes…). Richer than `crawl`,
+    /// which only sees the public recommendation feed.
+    Stats {
+        #[command(subcommand)]
+        action: StatsAction,
+    },
     /// Submit content for publishing.
     Post {
         /// One platform name per --to: youtube, wx-gzh, twitter, douyin.
@@ -146,6 +158,38 @@ enum Command {
         /// Visibility: public, unlisted, private.
         #[arg(long, default_value = "private")]
         privacy: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StatsAction {
+    /// Drive the account's dashboard, capture a fresh snapshot, store it,
+    /// and print it. May take tens of seconds for many posts.
+    Collect {
+        /// Platform: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// Max recent posts to pull stats for.
+        #[arg(long, default_value = "100")]
+        max_posts: u32,
+    },
+    /// Show stored account-level snapshots over time (newest first).
+    Account {
+        /// Platform: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// How many snapshots to show.
+        #[arg(long, default_value = "30")]
+        limit: u32,
+    },
+    /// Show the latest stored per-post stats for the account.
+    Posts {
+        /// Platform: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// How many posts to show.
+        #[arg(long, default_value = "50")]
+        limit: u32,
     },
 }
 
@@ -310,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Discovered { platform, limit } => {
             handle_discovered(&cli.server, auth, platform, limit).await
         }
+        Command::Stats { action } => handle_stats(&cli.server, auth, action).await,
         Command::Post {
             to,
             video,
@@ -388,6 +433,44 @@ async fn build_crawl(server: &str, auth: AuthInterceptor) -> anyhow::Result<Craw
         .await
         .with_context(|| format!("connecting to {server}"))?;
     Ok(CrawlClient::with_interceptor(channel, auth))
+}
+
+type StatsCli = StatsClient<InterceptedService<Channel, AuthInterceptor>>;
+
+async fn build_stats(server: &str, auth: AuthInterceptor) -> anyhow::Result<StatsCli> {
+    let channel = Channel::from_shared(server.to_string())?
+        .connect()
+        .await
+        .with_context(|| format!("connecting to {server}"))?;
+    Ok(StatsClient::with_interceptor(channel, auth))
+}
+
+/// Resolve a platform name to the single connected account's ID. Errors if
+/// there are zero or more than one accounts for that platform.
+async fn resolve_account_id(
+    server: &str,
+    auth: AuthInterceptor,
+    platform: &str,
+) -> anyhow::Result<String> {
+    let p = parse_platform(platform)?;
+    let mut accounts_client = build_accounts(server, auth).await?;
+    let accounts = accounts_client
+        .list(ListAccountsRequest::default())
+        .await
+        .context("Accounts.List")?
+        .into_inner()
+        .accounts;
+    let matching: Vec<&_> = accounts.iter().filter(|a| a.platform == p as i32).collect();
+    match matching.as_slice() {
+        [] => anyhow::bail!(
+            "no connected account for platform {p:?}. Run `multipost accounts ...` first"
+        ),
+        [a] => Ok(a.id.clone()),
+        many => anyhow::bail!(
+            "multiple {p:?} accounts; pass an explicit account when the picker lands. Connected: {:?}",
+            many.iter().map(|a| &a.id).collect::<Vec<_>>()
+        ),
+    }
 }
 
 async fn handle_crawl(
@@ -883,6 +966,115 @@ async fn handle_post(
         }
         if !job.last_error.is_empty() {
             println!("  last_error:  {}", job.last_error);
+        }
+    }
+    Ok(())
+}
+
+fn fmt_i(v: i64) -> String {
+    if v < 0 { "—".to_string() } else { v.to_string() }
+}
+
+fn fmt_f(v: f64) -> String {
+    if v < 0.0 { "—".to_string() } else { format!("{v:.2}") }
+}
+
+fn fmt_ts(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| secs.to_string())
+}
+
+fn print_account(a: Option<&ProtoAccountStats>) {
+    let Some(a) = a else {
+        println!("(no account stats)");
+        return;
+    };
+    let when = a.captured_at.as_ref().map(|t| fmt_ts(t.seconds)).unwrap_or_default();
+    println!("\nAccount stats [{}] @ {}", a.platform, when);
+    println!("  followers:          {}", fmt_i(a.followers));
+    println!("  following:          {}", fmt_i(a.following));
+    println!("  posts:              {}", fmt_i(a.post_count));
+    println!("  total reads/plays:  {}", fmt_i(a.total_views));
+    println!("  total income:       {}", fmt_f(a.total_income));
+    println!("  yesterday fans:     {}", fmt_i(a.yesterday_followers));
+    println!("  yesterday reads:    {}", fmt_i(a.yesterday_views));
+    println!("  yesterday income:   {}", fmt_f(a.yesterday_income));
+}
+
+fn print_posts(posts: &[ProtoPostStats]) {
+    println!("\nPosts ({}):", posts.len());
+    println!(
+        "  {:<6} {:<8} {:>8} {:>7} {:>6} {:>5} {:>6} {:>5}  title",
+        "type", "id", "impr", "reads", "likes", "cmt", "shares", "bm"
+    );
+    for p in posts {
+        let id_tail: String = p.post_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        let title: String = p.title.chars().take(30).collect();
+        println!(
+            "  {:<6} …{:<7} {:>8} {:>7} {:>6} {:>5} {:>6} {:>5}  {}",
+            p.post_type,
+            id_tail,
+            fmt_i(p.impressions),
+            fmt_i(p.reads),
+            fmt_i(p.likes),
+            fmt_i(p.comments),
+            fmt_i(p.shares),
+            fmt_i(p.bookmarks),
+            title,
+        );
+    }
+}
+
+async fn handle_stats(
+    server: &str,
+    auth: AuthInterceptor,
+    action: StatsAction,
+) -> anyhow::Result<()> {
+    match action {
+        StatsAction::Collect { platform, max_posts } => {
+            let account_id = resolve_account_id(server, auth.clone(), &platform).await?;
+            println!("Collecting {platform} stats (up to {max_posts} posts) — this drives the browser, may take a bit…");
+            let mut client = build_stats(server, auth).await?;
+            let snap = client
+                .collect(CollectStatsRequest { account_id, max_posts })
+                .await
+                .context("Stats.Collect rpc")?
+                .into_inner();
+            print_account(snap.account.as_ref());
+            print_posts(&snap.posts);
+        }
+        StatsAction::Account { platform, limit } => {
+            let account_id = resolve_account_id(server, auth.clone(), &platform).await?;
+            let mut client = build_stats(server, auth).await?;
+            let series = client
+                .get_account_stats(GetAccountStatsRequest { account_id, limit })
+                .await
+                .context("Stats.GetAccountStats rpc")?
+                .into_inner()
+                .snapshots;
+            if series.is_empty() {
+                println!("(no stored account snapshots — run `stats collect` first)");
+                return Ok(());
+            }
+            for a in &series {
+                print_account(Some(a));
+            }
+        }
+        StatsAction::Posts { platform, limit } => {
+            let account_id = resolve_account_id(server, auth.clone(), &platform).await?;
+            let mut client = build_stats(server, auth).await?;
+            let posts = client
+                .list_post_stats(ListPostStatsRequest { account_id, limit })
+                .await
+                .context("Stats.ListPostStats rpc")?
+                .into_inner()
+                .posts;
+            if posts.is_empty() {
+                println!("(no stored post stats — run `stats collect` first)");
+                return Ok(());
+            }
+            print_posts(&posts);
         }
     }
     Ok(())

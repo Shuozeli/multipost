@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package stats;
+
+import "google/protobuf/timestamp.proto";
+
+// Profile-stats service. Drives a connected account's own creator
+// dashboard / profile and returns account totals + per-post metrics —
+// richer than the public recommendation feed the Crawl service sees.
+service Stats {
+  // Drive the browser, capture a fresh snapshot, persist it (timestamped),
+  // and return it. Synchronous — may take tens of seconds for many posts.
+  rpc Collect(CollectStatsRequest) returns (StatsSnapshot);
+
+  // Account-level snapshots over time (newest first) — the growth series.
+  rpc GetAccountStats(GetAccountStatsRequest) returns (AccountStatsSeries);
+
+  // The latest snapshot for each of the account's recent posts.
+  rpc ListPostStats(ListPostStatsRequest) returns (PostStatsList);
+}
+
+message CollectStatsRequest {
+  // Account to collect for.
+  string account_id = 1;
+  // Max recent posts to pull. 0 => server default (100).
+  uint32 max_posts = 2;
+}
+
+message GetAccountStatsRequest {
+  string account_id = 1;
+  // Max snapshots to return (history depth). Server caps at 365.
+  uint32 limit = 2;
+}
+
+message ListPostStatsRequest {
+  string account_id = 1;
+  // Max posts to return. Server caps at 500.
+  uint32 limit = 2;
+}
+
+message StatsSnapshot {
+  AccountStats account = 1;
+  repeated PostStats posts = 2;
+}
+
+message AccountStatsSeries {
+  repeated AccountStats snapshots = 1;
+}
+
+message PostStatsList {
+  repeated PostStats posts = 1;
+}
+
+// Account-level totals. Integer metrics use -1 for "platform didn't
+// report this" (proto3 int64 has no null); doubles use -1.0.
+message AccountStats {
+  string platform = 1;
+  google.protobuf.Timestamp captured_at = 2;
+  int64 followers = 3;
+  int64 following = 4;
+  int64 post_count = 5;
+  int64 total_views = 6;
+  double total_income = 7;
+  int64 yesterday_followers = 8;
+  int64 yesterday_views = 9;
+  double yesterday_income = 10;
+}
+
+// Per-post metrics. Same -1 / -1.0 "not reported" convention.
+message PostStats {
+  string platform = 1;
+  string post_id = 2;
+  google.protobuf.Timestamp captured_at = 3;
+  string title = 4;
+  string post_type = 5;
+  google.protobuf.Timestamp created_at = 6;
+  int64 impressions = 7;
+  int64 reads = 8;
+  int64 likes = 9;
+  int64 comments = 10;
+  int64 shares = 11;
+  int64 bookmarks = 12;
+  int64 plays = 13;
+}

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher};
+use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher, StatsCollector};
 use multipost_orchestrator::JobState;
 use multipost_proto::crawl::CrawlJobState as ProtoCrawlJobState;
 use tokio::sync::broadcast;
@@ -16,6 +16,7 @@ use multipost_storage::accounts::AccountRepository;
 use multipost_storage::discovered::DiscoveredRepository;
 use multipost_storage::jobs::JobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
+use multipost_storage::stats::StatsRepository;
 use uuid::Uuid;
 
 /// Per-platform OAuth client config, loaded from env at startup.
@@ -99,6 +100,10 @@ pub struct AppState {
     pub crawl_jobs: Mutex<HashMap<Uuid, CrawlJobInternal>>,
     /// Broadcast bus for crawl-job state transitions (mirrors `events`).
     pub crawl_events: broadcast::Sender<CrawlJobInternal>,
+    /// Profile-stats collectors keyed by platform.
+    pub stats_collectors: HashMap<Platform, Arc<dyn StatsCollector>>,
+    /// SQLite-backed store for timestamped stats snapshots.
+    pub stats: Arc<dyn StatsRepository>,
 }
 
 impl AppState {
@@ -113,6 +118,8 @@ impl AppState {
         oauth: OAuthConfig,
         crawlers: HashMap<Platform, Arc<dyn Crawler>>,
         discovered: Arc<dyn DiscoveredRepository>,
+        stats_collectors: HashMap<Platform, Arc<dyn StatsCollector>>,
+        stats: Arc<dyn StatsRepository>,
     ) -> Self {
         Self {
             accounts,
@@ -129,6 +136,8 @@ impl AppState {
             discovered,
             crawl_jobs: Mutex::new(HashMap::new()),
             crawl_events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
+            stats_collectors,
+            stats,
         }
     }
 

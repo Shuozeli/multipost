@@ -13,6 +13,8 @@ pub mod cdp;
 pub mod credentials;
 pub mod publisher;
 pub mod selectors;
+pub mod stats;
 
 pub use credentials::TwitterCredentials;
 pub use publisher::TwitterPublisher;
+pub use stats::TwitterStatsCollector;

@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod discovered;
 pub mod jobs;
 pub mod media;
+pub mod stats;
 pub mod tenants;
 
 // Re-export the connection helper at the crate root.
