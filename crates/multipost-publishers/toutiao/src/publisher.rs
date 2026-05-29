@@ -676,45 +676,28 @@ async fn insert_weitoutiao_images(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // 5. Click 确定 to insert the images into the post. The panel mounts on
-    //    top, so its confirm button is the last visible 确定 on the page.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // 5. Modern 微头条 auto-inserts the uploaded image inline (the
+    //    .upload-handler-drag panel is part of the composer, NOT a modal —
+    //    it has only 本地上传/扫码上传, no 确定). So there is nothing to confirm:
+    //    step 4 already proved the image landed. Click a confirm button ONLY
+    //    if one happens to exist (older/other UI), but never bail on absence.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let confirm_js = r#"(() => {
         const btns = Array.from(document.querySelectorAll('button'))
-            .filter(b => b.offsetParent !== null && (b.innerText || '').trim() === '确定');
-        if (btns.length === 0) return {ok: false, reason: 'no 确定 button'};
+            .filter(b => b.offsetParent !== null
+                && ['确定', '确认', '插入'].includes((b.innerText || '').trim()));
+        if (btns.length === 0) return {clicked: false};
         btns[btns.length - 1].click();
-        return {ok: true};
+        return {clicked: true};
     })()"#;
     let r = page.evaluate(confirm_js).await?;
-    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        anyhow::bail!("click 确定 (insert images) failed: {r}");
-    }
-    tracing::info!("toutiao 微头条: clicked 确定 to insert images");
+    tracing::info!(
+        clicked = r.get("clicked").and_then(|v| v.as_bool()).unwrap_or(false),
+        "toutiao 微头条: image insert (auto-inserted inline if no confirm button)"
+    );
 
-    // 6. Wait for the panel to close so the editor regains focus + the
-    //    发布 button is interactable.
-    let start = Instant::now();
-    loop {
-        let open = page
-            .evaluate(
-                r#"(() => {
-                    const p = document.querySelector('.upload-image-panel, .upload-handler-drag');
-                    return !!(p && p.getBoundingClientRect().width > 50);
-                })()"#,
-            )
-            .await?
-            .as_bool()
-            .unwrap_or(false);
-        if !open {
-            break;
-        }
-        if start.elapsed() > Duration::from_secs(15) {
-            anyhow::bail!("微头条 upload panel did not close within 15s after 确定");
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-    tracing::info!("toutiao 微头条: image panel closed");
+    // 6. Settle so the inline image node is committed before 发布.
+    tokio::time::sleep(Duration::from_millis(800)).await;
     Ok(())
 }
 
