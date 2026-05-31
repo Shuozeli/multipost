@@ -14,6 +14,8 @@
 
 mod parser;
 mod publisher;
+mod user_crawler;
 
-pub use parser::decode_home_timeline;
+pub use parser::{decode_home_timeline, decode_user_tweets};
 pub use publisher::TwitterCrawler;
+pub use user_crawler::TwitterUserCrawler;

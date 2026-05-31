@@ -21,6 +21,7 @@ use multipost_proto::common::{Platform as ProtoPlatform, Visibility};
 use multipost_proto::crawl::crawl_client::CrawlClient;
 use multipost_proto::crawl::{
     CrawlJobState as ProtoCrawlJobState, GetCrawlJobRequest, ListItemsRequest, SubmitCrawlRequest,
+    SubmitUserCrawlRequest,
 };
 use multipost_proto::media::media_client::MediaClient;
 use multipost_proto::media::{UploadChunk, UploadMeta, upload_chunk};
@@ -115,6 +116,23 @@ enum Command {
         /// Server clamps to [5, 300].
         #[arg(long, default_value = "30")]
         duration: u32,
+    },
+    /// Crawl the recent posts of one or more specific accounts (vs. the
+    /// anonymous feed). Submits + long-polls one job per handle. Results
+    /// are persisted to the server's `discovered.sqlite` like `crawl`.
+    CrawlUser {
+        /// Platform: toutiao | twitter.
+        #[arg(long)]
+        platform: String,
+        /// Account to crawl. Repeatable for several accounts. For
+        /// twitter this is the screen name (e.g. `Tesla`, no `@`); for
+        /// toutiao the user token from the profile URL (`MS4wLj…`).
+        #[arg(long = "handle", required = true)]
+        handles: Vec<String>,
+        /// Target number of recent posts per account. Server clamps to
+        /// [1, 300].
+        #[arg(long, default_value = "100")]
+        max: u32,
     },
     /// List recently captured items for a platform from the server's
     /// SQLite store (across all crawl jobs).
@@ -355,6 +373,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Crawl { platform, duration } => {
             handle_crawl(&cli.server, auth, platform, duration).await
         }
+        Command::CrawlUser {
+            platform,
+            handles,
+            max,
+        } => handle_crawl_user(&cli.server, auth, platform, handles, max).await,
         Command::Discovered { platform, limit } => {
             handle_discovered(&cli.server, auth, platform, limit).await
         }
@@ -522,6 +545,59 @@ async fn handle_crawl(
         return Ok(());
     }
     print_items(&final_job.items);
+    Ok(())
+}
+
+async fn handle_crawl_user(
+    server: &str,
+    auth: AuthInterceptor,
+    platform: String,
+    handles: Vec<String>,
+    max: u32,
+) -> anyhow::Result<()> {
+    let mut client = build_crawl(server, auth).await?;
+    // Pace between accounts: hammering a platform with back-to-back
+    // profile loads trips a soft rate-limit (timelines stop hydrating for
+    // a stretch). A short gap between accounts keeps the batch under it.
+    const PACE_SECS: u64 = 8;
+    // One job per handle, sequentially (each drives the same browser).
+    for (i, handle) in handles.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(PACE_SECS)).await;
+        }
+        let submitted = client
+            .submit_user_crawl(SubmitUserCrawlRequest {
+                platform: platform.clone(),
+                handle: handle.clone(),
+                max_posts: max,
+            })
+            .await?
+            .into_inner();
+        println!(
+            "\n=== {} @{} — job {} (max {}) ===",
+            submitted.platform, handle, submitted.id, max
+        );
+
+        // User crawls are bounded by post count; give the safety-stop
+        // duration plus slack for the long-poll.
+        let wait = submitted.duration_secs + 30;
+        let final_job = client
+            .get_job(GetCrawlJobRequest {
+                id: submitted.id.clone(),
+                wait_seconds: wait,
+            })
+            .await?
+            .into_inner();
+
+        let state = ProtoCrawlJobState::try_from(final_job.state)
+            .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
+        println!("state: {:?}   posts: {}", state, final_job.items_captured);
+        if !final_job.last_error.is_empty() {
+            println!("error: {}", final_job.last_error);
+            continue;
+        }
+        print_items(&final_job.items);
+    }
     Ok(())
 }
 

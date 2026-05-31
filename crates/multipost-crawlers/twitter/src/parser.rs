@@ -55,6 +55,45 @@ pub fn decode_home_timeline(
     Ok(out)
 }
 
+/// Parse one `UserTweets` response body (a single user's profile
+/// timeline) into normalized items.
+///
+/// Same per-tweet shape as [`decode_home_timeline`] — only the envelope
+/// differs. The instructions live under `data.user.result.timeline`,
+/// which is itself wrapped in another `timeline` object
+/// (`…/timeline/timeline/instructions`); older / `timeline_v2` variants
+/// nest one level less, so all known forms are tried. Pinned tweets
+/// arrive as a `TimelinePinEntry` instruction carrying a single `entry`
+/// (not an `entries` array); both forms are walked.
+pub fn decode_user_tweets(
+    raw_json: &str,
+    captured_at: DateTime<Utc>,
+) -> Result<Vec<DiscoveredItem>, serde_json::Error> {
+    let v: Value = serde_json::from_str(raw_json)?;
+    let instructions = [
+        "/data/user/result/timeline/timeline/instructions",
+        "/data/user/result/timeline/instructions",
+        "/data/user/result/timeline_v2/timeline/instructions",
+    ]
+    .iter()
+    .find_map(|p| v.pointer(p).and_then(Value::as_array));
+    let Some(instructions) = instructions else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for inst in instructions {
+        if let Some(entries) = inst.get("entries").and_then(Value::as_array) {
+            for entry in entries {
+                collect_from_entry(entry, captured_at, &mut out);
+            }
+        } else if let Some(entry) = inst.get("entry") {
+            // TimelinePinEntry — a single pinned tweet.
+            collect_from_entry(entry, captured_at, &mut out);
+        }
+    }
+    Ok(out)
+}
+
 fn collect_from_entry(entry: &Value, captured_at: DateTime<Utc>, out: &mut Vec<DiscoveredItem>) {
     let content = match entry.get("content") {
         Some(c) => c,
@@ -320,6 +359,44 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].item_id, "100");
         assert_eq!(items[1].item_id, "101");
+    }
+
+    fn wrap_user_response(instructions: Vec<Value>) -> String {
+        // Mirror the real UserTweets envelope: result.timeline.timeline.instructions.
+        serde_json::json!({
+            "data": { "user": { "result": { "timeline": { "timeline": {
+                "instructions": instructions
+            } } } } }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn decode_user_tweets_extracts_entries_and_pinned() {
+        // Arrange — a pinned tweet (single `entry`) + an AddEntries block.
+        let pinned = make_tweet_entry("pin-1", "tesla", "pinned post", 10);
+        let regular = make_tweet_entry("reg-1", "tesla", "regular post", 20);
+        let instructions = vec![
+            serde_json::json!({ "type": "TimelinePinEntry", "entry": pinned }),
+            serde_json::json!({ "type": "TimelineAddEntries", "entries": [regular] }),
+        ];
+        let payload = wrap_user_response(instructions);
+
+        // Act
+        let items = decode_user_tweets(&payload, now()).unwrap();
+
+        // Assert
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].item_id, "pin-1");
+        assert_eq!(items[0].author_handle, "tesla");
+        assert_eq!(items[1].item_id, "reg-1");
+        assert_eq!(items[1].metrics.like_count, Some(20));
+    }
+
+    #[test]
+    fn decode_user_tweets_empty_payload_yields_empty() {
+        let items = decode_user_tweets(r#"{"data":{}}"#, now()).unwrap();
+        assert!(items.is_empty());
     }
 
     #[test]

@@ -69,7 +69,23 @@ fn decode_item(raw: &Value, captured_at: DateTime<Utc>) -> Option<DiscoveredItem
     if cell_type == Some(48) {
         return None;
     }
-    let item_id = raw.get("item_id").and_then(Value::as_str)?.to_string();
+    // `item_id` is a string on the recommendation feed but a JSON number
+    // on the profile (`/api/pc/list/user/feed`) feed, which also carries
+    // `item_id_str`. Accept all three forms.
+    let item_id = raw
+        .get("item_id_str")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            raw.get("item_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            raw.get("item_id")
+                .and_then(Value::as_i64)
+                .map(|n| n.to_string())
+        })?;
     if item_id.is_empty() {
         return None;
     }
@@ -217,6 +233,47 @@ mod tests {
         assert_eq!(
             it.metadata.get("cell_type"),
             Some(&serde_json::Value::Number(32.into()))
+        );
+    }
+
+    #[test]
+    fn decode_handles_numeric_item_id_from_user_feed() {
+        // Arrange — profile feed shape: item_id is a number, item_id_str
+        // is the canonical string.
+        let payload = serde_json::json!({
+            "has_more": true,
+            "data": [
+                {
+                    "item_id": 7645857600323568178_i64,
+                    "item_id_str": "7645857600323568178",
+                    "title": "野外救人",
+                    "source": "红星新闻",
+                    "read_count": 0,
+                    "comment_count": 3,
+                    "digg_count": 7,
+                    "repin_count": 2,
+                    "share_url": "https://toutiao.com/group/7645857600323568178/",
+                    "behot_time": 1_780_189_955,
+                    "cell_type": 60
+                }
+            ]
+        })
+        .to_string();
+
+        // Act
+        let items = decode_feed_response(&payload, now()).unwrap();
+
+        // Assert
+        assert_eq!(items.len(), 1);
+        let it = &items[0];
+        assert_eq!(it.item_id, "7645857600323568178"); // string form, not the lossy number
+        assert_eq!(it.author_handle, "红星新闻");
+        assert_eq!(it.metrics.like_count, Some(7)); // digg → like
+        assert_eq!(it.metrics.comment_count, Some(3));
+        assert_eq!(it.metrics.bookmark_count, Some(2)); // repin → bookmark
+        assert_eq!(
+            it.url.as_deref(),
+            Some("https://toutiao.com/group/7645857600323568178/")
         );
     }
 

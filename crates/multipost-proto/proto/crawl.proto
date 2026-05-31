@@ -14,6 +14,13 @@ service Crawl {
   // wait_seconds for long-polling) until state == COMPLETED.
   rpc Submit(SubmitCrawlRequest) returns (CrawlJob);
 
+  // Submit a per-user crawl: capture the recent posts of one specific
+  // account rather than the recommendation feed. Returns the same
+  // CrawlJob shape as Submit (poll GetJob / read via ListItems). The
+  // captured items carry the account's own posts with the same
+  // DiscoveredItem shape as feed items.
+  rpc SubmitUserCrawl(SubmitUserCrawlRequest) returns (CrawlJob);
+
   // Get the current state of a crawl job. When wait_seconds > 0 AND
   // the job is non-terminal, the server blocks for up to wait_seconds
   // waiting for the next state transition. Returns the items captured
@@ -30,6 +37,18 @@ message SubmitCrawlRequest {
   // How long the crawler should listen + scroll, in seconds.
   // Server clamps to [5, 300].
   uint32 duration_secs = 2;
+}
+
+message SubmitUserCrawlRequest {
+  // Platform string: "toutiao" | "twitter" | ...
+  string platform = 1;
+  // The account to crawl. Platform-specific:
+  //   twitter — the screen name (e.g. "Tesla", no leading '@').
+  //   toutiao — the user token from the profile URL ("MS4wLj…").
+  string handle = 2;
+  // Target number of recent posts to accumulate. Server clamps to
+  // [1, 300]; 0 means use the server default (100).
+  uint32 max_posts = 3;
 }
 
 message GetCrawlJobRequest {

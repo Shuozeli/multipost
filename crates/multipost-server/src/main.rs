@@ -15,8 +15,8 @@ use tonic::transport::Server;
 use tracing::{Level, info};
 
 use multipost_core::Platform;
-use multipost_crawlers_toutiao::ToutiaoCrawler;
-use multipost_crawlers_twitter::TwitterCrawler;
+use multipost_crawlers_toutiao::{ToutiaoCrawler, ToutiaoUserCrawler};
+use multipost_crawlers_twitter::{TwitterCrawler, TwitterUserCrawler};
 use multipost_proto::accounts::accounts_server::AccountsServer;
 use multipost_proto::crawl::crawl_server::CrawlServer;
 use multipost_proto::media::media_server::MediaServer;
@@ -171,6 +171,12 @@ async fn main() -> anyhow::Result<()> {
     crawlers.insert(Platform::Twitter, Arc::new(TwitterCrawler::new()));
     info!("Twitter crawler registered");
 
+    // Per-user crawlers (read-only; crawl one account's posts via pwright).
+    let mut user_crawlers: HashMap<Platform, Arc<dyn multipost_core::UserCrawler>> = HashMap::new();
+    user_crawlers.insert(Platform::Toutiao, Arc::new(ToutiaoUserCrawler::new()));
+    user_crawlers.insert(Platform::Twitter, Arc::new(TwitterUserCrawler::new()));
+    info!("Toutiao + Twitter user crawlers registered");
+
     let discovered = Arc::new(
         SqliteDiscoveredRepository::open(data_dir.join("discovered.sqlite"))
             .context("open discovered.sqlite")?,
@@ -196,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         publishers,
         oauth,
         crawlers,
+        user_crawlers,
         discovered,
         stats_collectors,
         stats,

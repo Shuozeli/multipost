@@ -12,6 +12,7 @@ pub mod job;
 pub mod platform;
 pub mod publisher;
 pub mod stats;
+pub mod user_discovery;
 
 pub use content::{Content, ContentKind, MediaRef, Visibility};
 pub use discovery::{CrawlOptions, Crawler, DiscoveredItem, DiscoveryMetrics};
@@ -20,3 +21,4 @@ pub use job::JobState;
 pub use platform::{AuthStatus, Capabilities, Platform};
 pub use publisher::{ConfirmStatus, MediaPayload, PublishContext, PublishHandle, Publisher};
 pub use stats::{AccountStats, PostStats, StatsCollector, StatsOptions, StatsSnapshot};
+pub use user_discovery::{UserCrawlOptions, UserCrawler};

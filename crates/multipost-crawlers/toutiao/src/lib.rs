@@ -13,6 +13,8 @@
 
 mod parser;
 mod publisher;
+mod user_crawler;
 
 pub use parser::decode_feed_response;
 pub use publisher::ToutiaoCrawler;
+pub use user_crawler::ToutiaoUserCrawler;

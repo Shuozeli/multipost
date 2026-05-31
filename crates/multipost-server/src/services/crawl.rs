@@ -14,12 +14,12 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use multipost_core::{CrawlOptions, DiscoveredItem, Platform};
+use multipost_core::{CrawlOptions, DiscoveredItem, Platform, UserCrawlOptions};
 use multipost_proto::crawl::crawl_server::Crawl as CrawlTrait;
 use multipost_proto::crawl::{
     CrawlJob as ProtoCrawlJob, CrawlJobState as ProtoCrawlJobState,
     DiscoveredItem as ProtoDiscoveredItem, DiscoveryMetrics as ProtoMetrics, GetCrawlJobRequest,
-    ListItemsRequest, ListItemsResponse, SubmitCrawlRequest,
+    ListItemsRequest, ListItemsResponse, SubmitCrawlRequest, SubmitUserCrawlRequest,
 };
 
 use crate::state::{AppState, CrawlJobInternal};
@@ -29,6 +29,11 @@ const MAX_DURATION_SECS: u32 = 300;
 const MAX_LONG_POLL_SECS: u32 = 300;
 const MAX_LIST_ITEMS_LIMIT: u32 = 200;
 const DEFAULT_LIST_ITEMS_LIMIT: u32 = 50;
+const MIN_MAX_POSTS: u32 = 1;
+const MAX_MAX_POSTS: u32 = 300;
+const DEFAULT_MAX_POSTS: u32 = 100;
+/// Safety stop on per-user crawl scrolling, in seconds.
+const USER_CRAWL_MAX_DURATION_SECS: u64 = 180;
 
 pub struct CrawlService {
     state: Arc<AppState>,
@@ -82,6 +87,62 @@ impl CrawlTrait for CrawlService {
         let st = self.state.clone();
         tokio::spawn(async move {
             run_crawl_job(st, job_id, platform, duration).await;
+        });
+
+        Ok(Response::new(to_proto(
+            &internal, /* include_items */ false,
+        )))
+    }
+
+    async fn submit_user_crawl(
+        &self,
+        req: Request<SubmitUserCrawlRequest>,
+    ) -> std::result::Result<Response<ProtoCrawlJob>, Status> {
+        let r = req.into_inner();
+        let platform = parse_platform(&r.platform)?;
+        if !self.state.user_crawlers.contains_key(&platform) {
+            return Err(Status::failed_precondition(format!(
+                "no user crawler registered for platform {:?}",
+                platform
+            )));
+        }
+        let handle = r.handle.trim().to_string();
+        if handle.is_empty() {
+            return Err(Status::invalid_argument("handle is required"));
+        }
+        let max_posts = if r.max_posts == 0 {
+            DEFAULT_MAX_POSTS
+        } else {
+            clamp(r.max_posts, MIN_MAX_POSTS, MAX_MAX_POSTS)
+        };
+
+        let job_id = Uuid::new_v4();
+        let internal = CrawlJobInternal {
+            id: job_id,
+            platform,
+            state: ProtoCrawlJobState::CrawlStatePending,
+            // Report the safety-stop duration; user crawls are bounded by
+            // post count, not time.
+            duration_secs: USER_CRAWL_MAX_DURATION_SECS as u32,
+            items_captured: 0,
+            items: Vec::new(),
+            last_error: None,
+            submitted_at: Utc::now(),
+            finished_at: None,
+        };
+        {
+            let mut map = self
+                .state
+                .crawl_jobs
+                .lock()
+                .map_err(|_| Status::internal("crawl_jobs poisoned"))?;
+            map.insert(job_id, internal.clone());
+        }
+        self.state.emit_crawl_event(internal.clone());
+
+        let st = self.state.clone();
+        tokio::spawn(async move {
+            run_user_crawl_job(st, job_id, platform, handle, max_posts).await;
         });
 
         Ok(Response::new(to_proto(
@@ -212,6 +273,58 @@ async fn run_crawl_job(state: Arc<AppState>, job_id: Uuid, platform: Platform, d
         }
         Err(e) => {
             warn!(%job_id, error = %e, "crawl failed");
+            fail(&state, job_id, &e.to_string());
+        }
+    }
+}
+
+/// The per-user crawl worker. Drives the platform's `UserCrawler`,
+/// persists the account's posts to the same `discovered` repo, and
+/// updates the in-memory job state. Mirrors [`run_crawl_job`].
+async fn run_user_crawl_job(
+    state: Arc<AppState>,
+    job_id: Uuid,
+    platform: Platform,
+    handle: String,
+    max_posts: u32,
+) {
+    transition(&state, job_id, |j| {
+        j.state = ProtoCrawlJobState::CrawlStateRunning;
+    });
+
+    let crawler = match state.user_crawlers.get(&platform).cloned() {
+        Some(c) => c,
+        None => {
+            fail(&state, job_id, "user crawler vanished after submit");
+            return;
+        }
+    };
+
+    let opts = UserCrawlOptions {
+        handle: handle.clone(),
+        max_posts: max_posts as usize,
+        max_duration_secs: USER_CRAWL_MAX_DURATION_SECS,
+        ..Default::default()
+    };
+    let result = crawler.crawl_user(&opts).await;
+
+    match result {
+        Ok(items) => {
+            if !items.is_empty()
+                && let Err(e) = state.discovered.upsert_many(&items).await
+            {
+                warn!(%job_id, error = %e, "discovered.upsert_many failed");
+            }
+            info!(%job_id, %handle, count = items.len(), "user crawl complete");
+            transition(&state, job_id, |j| {
+                j.items_captured = items.len() as u32;
+                j.items = items;
+                j.state = ProtoCrawlJobState::CrawlStateCompleted;
+                j.finished_at = Some(Utc::now());
+            });
+        }
+        Err(e) => {
+            warn!(%job_id, %handle, error = %e, "user crawl failed");
             fail(&state, job_id, &e.to_string());
         }
     }

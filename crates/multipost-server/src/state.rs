@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher, StatsCollector};
+use multipost_core::{Crawler, DiscoveredItem, Platform, Publisher, StatsCollector, UserCrawler};
 use multipost_orchestrator::JobState;
 use multipost_proto::crawl::CrawlJobState as ProtoCrawlJobState;
 use multipost_publishers_youtube::OAuthCredentials;
@@ -94,6 +94,9 @@ pub struct AppState {
     pub events: broadcast::Sender<JobEventInternal>,
     /// Crawler registry keyed by platform.
     pub crawlers: HashMap<Platform, Arc<dyn Crawler>>,
+    /// Per-user crawler registry keyed by platform (crawl a specific
+    /// account's posts, vs. the anonymous feed `crawlers` above).
+    pub user_crawlers: HashMap<Platform, Arc<dyn UserCrawler>>,
     /// SQLite-backed store for items captured by crawl jobs.
     pub discovered: Arc<dyn DiscoveredRepository>,
     /// In-flight + finished crawl jobs.
@@ -117,6 +120,7 @@ impl AppState {
         publishers: HashMap<Platform, Arc<dyn Publisher>>,
         oauth: OAuthConfig,
         crawlers: HashMap<Platform, Arc<dyn Crawler>>,
+        user_crawlers: HashMap<Platform, Arc<dyn UserCrawler>>,
         discovered: Arc<dyn DiscoveredRepository>,
         stats_collectors: HashMap<Platform, Arc<dyn StatsCollector>>,
         stats: Arc<dyn StatsRepository>,
@@ -133,6 +137,7 @@ impl AppState {
             confirm_tasks: Mutex::new(HashMap::new()),
             events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
             crawlers,
+            user_crawlers,
             discovered,
             crawl_jobs: Mutex::new(HashMap::new()),
             crawl_events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
