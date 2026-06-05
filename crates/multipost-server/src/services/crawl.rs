@@ -201,20 +201,12 @@ async fn run_crawl_job(
         }
     };
 
-    let permit = match state.crawl_permits.clone().acquire_owned().await {
-        Ok(p) => p,
-        Err(_) => {
-            fail(&state, job_id, "crawl scheduler closed");
-            return;
-        }
-    };
     let opts = CrawlOptions {
         duration_secs: duration as u64,
         source_urls,
         ..Default::default()
     };
     let result = crawler.run(&opts).await;
-    drop(permit);
 
     match result {
         Ok(items) => {
