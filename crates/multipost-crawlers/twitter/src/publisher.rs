@@ -46,6 +46,7 @@ impl Crawler for TwitterCrawler {
         if !opts.source_urls.is_empty() {
             let mut items = Vec::new();
             for source_url in &opts.source_urls {
+                pwright_run(opts, &["open", NOOP_URL]).await?;
                 let mut captured =
                     capture_twitter_responses(opts, TWEET_DETAIL_URL_SUBSTRING, source_url).await?;
                 items.append(&mut captured);
