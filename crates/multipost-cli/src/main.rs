@@ -108,18 +108,26 @@ enum Command {
     /// content + engagement metrics. Submits + long-polls. Results are
     /// also persisted to `~/.multipost/discovered.sqlite` on the server.
     Crawl {
-        /// Platform to crawl: toutiao | twitter.
+        /// Platform to crawl: toutiao | twitter | youtube.
         #[arg(long)]
         platform: String,
         /// How long the crawler should listen + scroll, in seconds.
         /// Server clamps to [5, 300].
         #[arg(long, default_value = "30")]
         duration: u32,
+        /// Source URL/page to crawl. Repeatable. Required for YouTube
+        /// unless the server has MULTIPOST_YOUTUBE_CRAWL_URLS set.
+        #[arg(long = "url")]
+        urls: Vec<String>,
+        /// Return captured items in the job response without writing
+        /// them to the server's discovered.sqlite.
+        #[arg(long)]
+        skip_persist: bool,
     },
     /// List recently captured items for a platform from the server's
     /// SQLite store (across all crawl jobs).
     Discovered {
-        /// Platform: toutiao | twitter.
+        /// Platform: toutiao | twitter | youtube.
         #[arg(long)]
         platform: String,
         /// Max items.
@@ -352,9 +360,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Cancel { job_id } => handle_cancel(&cli.server, auth, job_id).await,
         Command::Watch { job_id } => handle_watch(&cli.server, auth, job_id).await,
         Command::GetJob { job_id, wait } => handle_get_job(&cli.server, auth, job_id, wait).await,
-        Command::Crawl { platform, duration } => {
-            handle_crawl(&cli.server, auth, platform, duration).await
-        }
+        Command::Crawl {
+            platform,
+            duration,
+            urls,
+            skip_persist,
+        } => handle_crawl(&cli.server, auth, platform, duration, urls, skip_persist).await,
         Command::Discovered { platform, limit } => {
             handle_discovered(&cli.server, auth, platform, limit).await
         }
@@ -490,12 +501,16 @@ async fn handle_crawl(
     auth: AuthInterceptor,
     platform: String,
     duration: u32,
+    urls: Vec<String>,
+    skip_persist: bool,
 ) -> anyhow::Result<()> {
     let mut client = build_crawl(server, auth).await?;
     let submitted = client
         .submit(SubmitCrawlRequest {
             platform: platform.clone(),
             duration_secs: duration,
+            source_urls: urls,
+            skip_persist,
         })
         .await?
         .into_inner();

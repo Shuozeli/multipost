@@ -30,6 +30,12 @@ message SubmitCrawlRequest {
   // How long the crawler should listen + scroll, in seconds.
   // Server clamps to [5, 300].
   uint32 duration_secs = 2;
+  // Optional source URLs/pages. YouTube channel crawling requires at
+  // least one URL unless the server has MULTIPOST_YOUTUBE_CRAWL_URLS.
+  repeated string source_urls = 3;
+  // If true, return captured items in the CrawlJob response but skip
+  // writing them to discovered.sqlite.
+  bool skip_persist = 4;
 }
 
 message GetCrawlJobRequest {
