@@ -46,102 +46,107 @@ impl Crawler for ToutiaoCrawler {
         //    subsequent `network-listen` and `eval` invocations attach
         //    to the same target.
         pwright_run(opts, &["open", TOUTIAO_HOME]).await?;
-        sleep(Duration::from_secs(3)).await;
+        let result = async {
+            sleep(Duration::from_secs(3)).await;
 
-        // 2. Spawn the listener subprocess. It will exit on its own when
-        //    --duration expires.
-        let cdp = opts.cdp_url.clone();
-        let duration_arg = opts.duration_secs.to_string();
-        let mut listener = Command::new(&opts.pwright_bin);
-        if let Some(c) = cdp.as_deref() {
-            listener.env("PWRIGHT_CDP", c);
-        }
-        listener
-            .args([
-                "network-listen",
-                "--filter",
-                FEED_URL_SUBSTRING,
-                "--resource-type",
-                "XHR",
-                "--include-body",
-                "--duration",
-                &duration_arg,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-        let mut child = listener
-            .spawn()
-            .map_err(|e| PublishError::Transient(format!("spawn pwright: {e}")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| PublishError::Transient("pwright stdout missing".into()))?;
-        let mut reader = BufReader::new(stdout).lines();
-
-        // 3. Drive scroll in parallel for the duration of the listener.
-        //    Cancelled implicitly when this method returns (task is
-        //    spawned with `tokio::spawn` and uses opts ownership).
-        let scroll_opts = opts.clone();
-        let scroll_duration = Duration::from_secs(opts.duration_secs);
-        let scroller = tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + scroll_duration;
-            loop {
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                let js = format!("window.scrollBy(0, {SCROLL_PIXELS}); 1");
-                if let Err(e) = pwright_run(&scroll_opts, &["eval", &js]).await {
-                    debug!("scroll eval failed: {e}");
-                }
-                sleep(Duration::from_secs(SCROLL_INTERVAL_SECS)).await;
+            // 2. Spawn the listener subprocess. It will exit on its own when
+            //    --duration expires.
+            let cdp = opts.cdp_url.clone();
+            let duration_arg = opts.duration_secs.to_string();
+            let mut listener = Command::new(&opts.pwright_bin);
+            if let Some(c) = cdp.as_deref() {
+                listener.env("PWRIGHT_CDP", c);
             }
-        });
+            listener
+                .args([
+                    "network-listen",
+                    "--filter",
+                    FEED_URL_SUBSTRING,
+                    "--resource-type",
+                    "XHR",
+                    "--include-body",
+                    "--duration",
+                    &duration_arg,
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null());
+            let mut child = listener
+                .spawn()
+                .map_err(|e| PublishError::Transient(format!("spawn pwright: {e}")))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| PublishError::Transient("pwright stdout missing".into()))?;
+            let mut reader = BufReader::new(stdout).lines();
 
-        // 4. Drain the JSONL stream as the listener emits events.
-        let now = Utc::now();
-        let mut items = Vec::new();
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|e| PublishError::Transient(format!("listener stdout: {e}")))?
-        {
-            if line.is_empty() {
-                continue;
-            }
-            let event: Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!("skip non-JSON listener line: {e}");
+            // 3. Drive scroll in parallel for the duration of the listener.
+            //    Cancelled implicitly when this method returns (task is
+            //    spawned with `tokio::spawn` and uses opts ownership).
+            let scroll_opts = opts.clone();
+            let scroll_duration = Duration::from_secs(opts.duration_secs);
+            let scroller = tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + scroll_duration;
+                loop {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    let js = format!("window.scrollBy(0, {SCROLL_PIXELS}); 1");
+                    if let Err(e) = pwright_run(&scroll_opts, &["eval", &js]).await {
+                        debug!("scroll eval failed: {e}");
+                    }
+                    sleep(Duration::from_secs(SCROLL_INTERVAL_SECS)).await;
+                }
+            });
+
+            // 4. Drain the JSONL stream as the listener emits events.
+            let now = Utc::now();
+            let mut items = Vec::new();
+            while let Some(line) = reader
+                .next_line()
+                .await
+                .map_err(|e| PublishError::Transient(format!("listener stdout: {e}")))?
+            {
+                if line.is_empty() {
                     continue;
                 }
-            };
-            if event.get("event").and_then(Value::as_str) != Some("response") {
-                continue;
+                let event: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("skip non-JSON listener line: {e}");
+                        continue;
+                    }
+                };
+                if event.get("event").and_then(Value::as_str) != Some("response") {
+                    continue;
+                }
+                let body = match event.get("body").and_then(Value::as_str) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                match decode_feed_response(body, now) {
+                    Ok(mut decoded) => items.append(&mut decoded),
+                    Err(e) => warn!("toutiao feed decode failed: {e}"),
+                }
             }
-            let body = match event.get("body").and_then(Value::as_str) {
-                Some(b) => b,
-                None => continue,
-            };
-            match decode_feed_response(body, now) {
-                Ok(mut decoded) => items.append(&mut decoded),
-                Err(e) => warn!("toutiao feed decode failed: {e}"),
+
+            // 5. Reap the children.
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| PublishError::Transient(format!("listener wait: {e}")))?;
+            if !status.success() {
+                warn!("pwright network-listen exited non-zero: {status}");
             }
-        }
+            let _ = scroller.await; // already deadline-bounded
 
-        // 5. Reap the children.
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| PublishError::Transient(format!("listener wait: {e}")))?;
-        if !status.success() {
-            warn!("pwright network-listen exited non-zero: {status}");
+            // 6. De-dup within this run; later metrics win.
+            items = dedup_keep_last(items);
+            Ok(items)
         }
-        let _ = scroller.await; // already deadline-bounded
-
-        // 6. De-dup within this run; later metrics win.
-        items = dedup_keep_last(items);
-        Ok(items)
+        .await;
+        close_current_tab(opts).await;
+        result
     }
 }
 
@@ -168,6 +173,12 @@ async fn pwright_run(opts: &CrawlOptions, args: &[&str]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+async fn close_current_tab(opts: &CrawlOptions) {
+    if let Err(e) = pwright_run(opts, &["close"]).await {
+        warn!("pwright close failed after toutiao crawl: {e}");
+    }
 }
 
 fn dedup_keep_last(items: Vec<DiscoveredItem>) -> Vec<DiscoveredItem> {

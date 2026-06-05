@@ -47,8 +47,10 @@ impl Crawler for TwitterCrawler {
             let mut items = Vec::new();
             for source_url in &opts.source_urls {
                 pwright_run(opts, &["open", NOOP_URL]).await?;
-                let mut captured =
-                    capture_twitter_responses(opts, TWEET_DETAIL_URL_SUBSTRING, source_url).await?;
+                let captured =
+                    capture_twitter_responses(opts, TWEET_DETAIL_URL_SUBSTRING, source_url).await;
+                close_current_tab(opts).await;
+                let mut captured = captured?;
                 items.append(&mut captured);
             }
             return Ok(dedup_keep_last(items));
@@ -59,7 +61,9 @@ impl Crawler for TwitterCrawler {
         //    same-route navigations as no-ops).
         pwright_run(opts, &["open", NOOP_URL]).await?;
 
-        let items = capture_twitter_responses(opts, FEED_URL_SUBSTRING, HOME_URL).await?;
+        let items = capture_twitter_responses(opts, FEED_URL_SUBSTRING, HOME_URL).await;
+        close_current_tab(opts).await;
+        let items = items?;
         Ok(dedup_keep_last(items))
     }
 }
@@ -161,6 +165,12 @@ async fn pwright_run(opts: &CrawlOptions, args: &[&str]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+async fn close_current_tab(opts: &CrawlOptions) {
+    if let Err(e) = pwright_run(opts, &["close"]).await {
+        warn!("pwright close failed after twitter crawl: {e}");
+    }
 }
 
 fn dedup_keep_last(items: Vec<DiscoveredItem>) -> Vec<DiscoveredItem> {
