@@ -101,6 +101,10 @@ pub trait Crawler: Send + Sync + 'static {
 pub struct CrawlOptions {
     /// How long to listen + scroll, in seconds.
     pub duration_secs: u64,
+    /// Optional platform-specific source URLs to crawl. Feed crawlers may
+    /// ignore this and use their default recommendation route; page
+    /// crawlers such as YouTube channel crawling require at least one URL.
+    pub source_urls: Vec<String>,
     /// Path to the `pwright` binary. Defaults to `pwright` (looked up
     /// on `PATH`) when constructed via `Default`.
     pub pwright_bin: String,
@@ -113,6 +117,16 @@ impl Default for CrawlOptions {
     fn default() -> Self {
         Self {
             duration_secs: 30,
+            source_urls: std::env::var("MULTIPOST_CRAWL_SOURCE_URLS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             pwright_bin: std::env::var("PWRIGHT_BIN").unwrap_or_else(|_| "pwright".to_string()),
             cdp_url: std::env::var("PWRIGHT_CDP").ok(),
         }
