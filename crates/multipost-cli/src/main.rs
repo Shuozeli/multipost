@@ -1,6 +1,7 @@
 //! multipost CLI.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -505,6 +506,11 @@ async fn handle_crawl(
     skip_persist: bool,
 ) -> anyhow::Result<()> {
     let mut client = build_crawl(server, auth).await?;
+    let source_url_count = urls.len().max(1) as u32;
+    let wait_budget_secs = duration
+        .saturating_mul(source_url_count)
+        .saturating_add(30)
+        .max(30);
     let submitted = client
         .submit(SubmitCrawlRequest {
             platform: platform.clone(),
@@ -518,16 +524,35 @@ async fn handle_crawl(
         "submitted crawl job {} ({}, {}s)",
         submitted.id, submitted.platform, submitted.duration_secs
     );
-    println!("waiting up to {}s for completion ...", duration + 30);
+    println!("waiting up to {}s for completion ...", wait_budget_secs);
 
-    // Long-poll until terminal.
-    let final_job = client
-        .get_job(GetCrawlJobRequest {
-            id: submitted.id.clone(),
-            wait_seconds: duration + 30,
-        })
-        .await?
-        .into_inner();
+    let deadline = Instant::now() + Duration::from_secs(wait_budget_secs as u64);
+    let final_job = loop {
+        let now = Instant::now();
+        let wait_seconds = if now >= deadline {
+            0
+        } else {
+            let remaining = deadline.saturating_duration_since(now).as_secs();
+            remaining.clamp(1, 60) as u32
+        };
+        let job = client
+            .get_job(GetCrawlJobRequest {
+                id: submitted.id.clone(),
+                wait_seconds,
+            })
+            .await?
+            .into_inner();
+        let state = ProtoCrawlJobState::try_from(job.state)
+            .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
+        if matches!(
+            state,
+            ProtoCrawlJobState::CrawlStateCompleted | ProtoCrawlJobState::CrawlStateFailed
+        ) || Instant::now() >= deadline
+        {
+            break job;
+        }
+        println!("state: {:?}   items: {}", state, job.items_captured);
+    };
 
     let state = ProtoCrawlJobState::try_from(final_job.state)
         .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
@@ -569,10 +594,13 @@ fn print_items(items: &[multipost_proto::crawl::DiscoveredItem]) {
             .collect::<String>()
             .replace('\n', " ");
         let handle: String = it.author_handle.chars().take(16).collect();
+        let item_id: String = it.item_id.chars().take(20).collect();
         println!(
-            "  [{:>3}] {:<16} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
+            "  [{:>3}] {:<20} {:<16} len={:<5} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
             i + 1,
+            item_id,
             handle,
+            it.body.chars().count(),
             m.read_count,
             m.like_count,
             m.comment_count,
