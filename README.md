@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-06-04T00:17:00Z -->
 # multipost
 
 A pure-Rust gRPC service for **cross-posting to social platforms**, plus
@@ -129,6 +130,7 @@ export MULTIPOST_API_KEY=<the-key>
 
 # 6. Read side: crawl the public feed, or collect your own profile stats.
 ./target/release/multipost crawl --platform twitter --duration 30
+./target/release/multipost crawl --platform youtube --url https://www.youtube.com/@flipradio_fearnation/videos --duration 30
 ./target/release/multipost stats collect --platform toutiao --max-posts 100
 ./target/release/multipost stats posts   --platform toutiao    # latest per-post numbers
 ```
@@ -147,6 +149,55 @@ cargo test --workspace
 ```
 
 For local development, set `MULTIPOST_DEV_NO_AUTH=1` on the server to bypass the API-key check; all requests are then bound to `tenant_id=00000000-0000-0000-0000-000000000000`. Production deploys must not set it.
+
+## Crawl scheduler service
+
+`multipost-server` can also keep the discovery store warm without a caller
+submitting crawl jobs. Set:
+
+```bash
+PWRIGHT_BIN=/usr/local/bin/pwright
+PWRIGHT_CDP=http://alienware-win-yuacx.tail8f3b66.ts.net:9222
+MULTIPOST_CRAWL_ENABLED=1
+MULTIPOST_CRAWL_PLATFORMS=youtube,toutiao,twitter
+MULTIPOST_CRAWL_DURATION_SECS=30
+MULTIPOST_CRAWL_INTERVAL_SECS=900
+MULTIPOST_YOUTUBE_CRAWL_URLS=https://www.youtube.com/@flipradio_fearnation/videos
+```
+
+Scheduled crawls run serially and upsert into
+`$MULTIPOST_DATA_DIR/discovered.sqlite`. The same global crawler permit also
+serializes manual `Crawl.Submit` requests, because pwright CLI active-tab state
+is shared by working directory.
+
+`GET /healthz` returns service and scheduler state:
+
+```json
+{
+  "status": "ok",
+  "db": "ok",
+  "crawl": {
+    "registered_platforms": ["youtube", "toutiao", "twitter"],
+    "available_permits": 1,
+    "in_flight_jobs": 0
+  },
+  "crawl_scheduler": {
+    "enabled": true,
+    "configured_platforms": ["youtube"],
+    "running_platform": null,
+    "last_runs": {
+      "youtube": {
+        "items_captured": 60,
+        "last_error": null
+      }
+    }
+  }
+}
+```
+
+The Docker image builds `multipost-server` and `multipost`, but the runtime must
+provide the `pwright` CLI at `$PWRIGHT_BIN` (for example by deriving the image or
+mounting the binary).
 
 ## Prototype scripts
 

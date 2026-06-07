@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-05-29T00:00:00Z -->
+<!-- agent-updated: 2026-06-04T00:17:00Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
@@ -10,6 +10,14 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
   remote Chrome over CDP (`DataTransfer` + `atob`, CSP-safe). CLI `post --image`.
 - [x] **Crawl / discovery** — `Crawl` gRPC service + Toutiao/Twitter crawlers
   (pwright network-listen → `DiscoveredItem` → SQLite); CLI `crawl` / `discovered`.
+- [x] **YouTube discovery crawler** — `multipost-crawlers-youtube` crawls channel/video
+  pages via pwright DOM extraction; `Crawl.Submit` and CLI `crawl` now accept repeatable
+  source URLs for page-based crawling.
+- [x] **Crawl scheduler service mode** — `multipost-server` can run configured
+  platform crawls on an interval, serializing pwright access and upserting into
+  `discovered.sqlite`.
+- [x] **Crawl service health** — `/healthz` returns registered crawl platforms,
+  permit/job state, and the latest scheduled crawl result per platform.
 - [x] **Profile stats** — `Stats` gRPC service + Toutiao/Twitter collectors;
   timestamped account + per-post snapshots (SQLite); CLI `stats collect/account/posts`.
   Toutiao pages the works feed (offset index, dedup by id); Twitter scrapes the profile.

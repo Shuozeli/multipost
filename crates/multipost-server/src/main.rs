@@ -1,6 +1,7 @@
 //! multipost server binary.
 
 mod auth;
+mod crawl_scheduler;
 mod services;
 mod state;
 
@@ -17,6 +18,7 @@ use tracing::{Level, info};
 use multipost_core::Platform;
 use multipost_crawlers_toutiao::ToutiaoCrawler;
 use multipost_crawlers_twitter::TwitterCrawler;
+use multipost_crawlers_youtube::YouTubeCrawler;
 use multipost_proto::accounts::accounts_server::AccountsServer;
 use multipost_proto::crawl::crawl_server::CrawlServer;
 use multipost_proto::media::media_server::MediaServer;
@@ -166,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Crawlers (read-only; drive pwright via subprocess).
     let mut crawlers: HashMap<Platform, Arc<dyn multipost_core::Crawler>> = HashMap::new();
+    crawlers.insert(Platform::YouTube, Arc::new(YouTubeCrawler::new()));
+    info!("YouTube crawler registered");
     crawlers.insert(Platform::Toutiao, Arc::new(ToutiaoCrawler::new()));
     info!("Toutiao crawler registered");
     crawlers.insert(Platform::Twitter, Arc::new(TwitterCrawler::new()));
@@ -212,18 +216,21 @@ async fn main() -> anyhow::Result<()> {
     // Done before binding gRPC so the in-memory `confirm_tasks` map
     // reflects reality the moment we start accepting traffic.
     recover_confirming_jobs(&app_state).await;
+    let crawl_scheduler_task = crawl_scheduler::spawn_if_configured(app_state.clone());
 
     let interceptor = AuthInterceptor::new(tenants, dev_no_auth);
 
     // Spawn HTTP listener on a side task.
     let http_addr = args.http_addr;
+    let http_state = app_state.clone();
     let http_task = tokio::spawn(async move {
         let app = axum::Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route(
                 "/oauth/callback/:platform",
                 axum::routing::get(oauth_callback),
-            );
+            )
+            .with_state(http_state);
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
         info!(addr = %http_addr, "HTTP listener bound");
         axum::serve(listener, app).await?;
@@ -258,6 +265,9 @@ async fn main() -> anyhow::Result<()> {
     // a 30s deadline — anything still in flight gets aborted and the
     // job stays in Confirming for the next startup's recovery scan.
     drain_confirm_tasks(&app_state, std::time::Duration::from_secs(30)).await;
+    if let Some(task) = crawl_scheduler_task {
+        task.abort();
+    }
 
     http_task.abort();
     Ok(())
@@ -392,8 +402,45 @@ async fn drain_confirm_tasks(state: &std::sync::Arc<AppState>, deadline: std::ti
     }
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> axum::Json<serde_json::Value> {
+    let scheduler = state
+        .crawl_scheduler_status
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let scheduler_last_runs = scheduler
+        .last_runs
+        .iter()
+        .map(|(platform, run)| {
+            (
+                platform.as_str().to_string(),
+                serde_json::json!({
+                    "started_at": run.started_at,
+                    "finished_at": run.finished_at,
+                    "items_captured": run.items_captured,
+                    "last_error": run.last_error,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let in_flight_crawl_jobs = state.crawl_jobs.lock().map(|m| m.len()).unwrap_or_default();
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "db": "ok",
+        "crawl": {
+            "registered_platforms": state.crawlers.keys().map(|p| p.as_str()).collect::<Vec<_>>(),
+            "available_permits": state.crawl_permits.available_permits(),
+            "in_flight_jobs": in_flight_crawl_jobs,
+        },
+        "crawl_scheduler": {
+            "enabled": scheduler.enabled,
+            "configured_platforms": scheduler.configured_platforms.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            "running_platform": scheduler.running_platform.map(|p| p.as_str()),
+            "last_runs": scheduler_last_runs,
+        },
+    }))
 }
 
 async fn oauth_callback(

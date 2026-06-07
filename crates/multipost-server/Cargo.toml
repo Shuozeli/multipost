@@ -29,6 +29,7 @@ multipost-publishers-toutiao.workspace = true
 multipost-publishers-twitter.workspace = true
 multipost-crawlers-toutiao.workspace = true
 multipost-crawlers-twitter.workspace = true
+multipost-crawlers-youtube.workspace = true
 tonic.workspace = true
 prost.workspace = true
 prost-types.workspace = true

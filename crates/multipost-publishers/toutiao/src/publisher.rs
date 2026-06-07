@@ -736,6 +736,15 @@ async fn insert_weitoutiao_images(
     let start = Instant::now();
     let mut clicked = false;
     loop {
+        // Re-foreground BEFORE every click attempt. The 确定 button only honors
+        // a TRUSTED CDP mouse click, and Chrome hit-tests the FOREGROUND tab
+        // only. The single bring_to_front before the upload (line ~646) is not
+        // enough: a concurrent job on the same browser (e.g. the twitter post
+        // in the same single-story run) can steal foreground during the ~90s
+        // upload wait, leaving this tab `vis:hidden` so real_click lands on
+        // nothing and the drawer never commits ("确定 did not commit"). Re-
+        // activating the tab each pass makes the trusted click hit-test here.
+        let _ = page.bring_to_front().await;
         // Re-locate + re-click each pass: byte-design can swallow the first
         // genuine click while the panel settles.
         let r = page.evaluate(rect_js).await?;
@@ -802,6 +811,15 @@ async fn run_weitoutiao_flow(
     }
     tracing::info!("toutiao: 微头条 editor mounted");
 
+    // Pin focus emulation for the whole publish flow so the page always reports
+    // visibilityState:visible + hasFocus:true. Without this the byte-design
+    // image-insert 确定 button intermittently refuses to commit when the shared
+    // alienware Chrome window is occluded (tab goes vis:hidden even after
+    // Page.bringToFront) — see PageSession::set_focus_emulation.
+    if let Err(e) = page.set_focus_emulation(true).await {
+        tracing::warn!(error = %e, "toutiao 微头条: set_focus_emulation failed (non-fatal)");
+    }
+
     // Focus, then CLEAR any restored draft BEFORE typing. Toutiao 微头条
     // auto-saves drafts and restores them when the editor mounts; without an
     // explicit clear, execCommand('insertText') APPENDS the new body to the
@@ -839,25 +857,54 @@ async fn run_weitoutiao_flow(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     if !cleared {
-        // A leftover draft IMAGE that selectAll+delete can't remove would
-        // publish a stale image alongside this caption — fail closed.
-        let leftover_imgs = page
-            .evaluate(
-                r#"(() => { const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
-                    return ed ? ed.querySelectorAll('img').length : 0; })()"#,
-            )
-            .await?
-            .as_i64()
-            .unwrap_or(0);
+        // selectAll+delete left a draft IMAGE behind. Toutiao 微头条 inserts
+        // images as ProseMirror *atom/leaf* nodes which `selectAll` then
+        // `delete` can skip, and the auto-saved draft is re-restored async, so
+        // the 5x200ms clear loses the race. Stronger purge: select EACH image
+        // node individually and delete it through ProseMirror's command path,
+        // retried to outlast the async draft-restore. Fail closed only if an
+        // image truly survives (would merge a stale image into this caption),
+        // and log its outerHTML so the exact node shape is diagnosable.
+        let purge_js = r#"(() => {
+            const ed = document.querySelector('.ProseMirror[contenteditable="true"]');
+            if (!ed) return {imgs: 0, info: []};
+            ed.focus();
+            Array.from(ed.querySelectorAll('img')).forEach(img => {
+                try {
+                    const sel = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNode(img);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    document.execCommand('delete', false, null);
+                } catch (e) {}
+            });
+            const left = Array.from(ed.querySelectorAll('img'));
+            return { imgs: left.length, info: left.map(i => (i.outerHTML || '').slice(0, 240)) };
+        })()"#;
+        let mut leftover_imgs = 0i64;
+        let mut info = String::new();
+        for _ in 0..8 {
+            let r = page.evaluate(purge_js).await?;
+            leftover_imgs = r.get("imgs").and_then(|v| v.as_i64()).unwrap_or(0);
+            info = r.get("info").map(|v| v.to_string()).unwrap_or_default();
+            if leftover_imgs == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
         if leftover_imgs > 0 {
+            tracing::warn!(
+                leftover_imgs,
+                info = %info,
+                "toutiao 微头条: leftover draft image(s) survive clear+node-purge"
+            );
             anyhow::bail!(
-                "微头条 editor still has {leftover_imgs} leftover draft image(s) after clear — \
+                "微头条 editor still has {leftover_imgs} leftover draft image(s) after clear+purge — \
                  refusing to publish (would merge a stale draft image into this post)"
             );
         }
-        tracing::warn!(
-            "toutiao 微头条: editor not empty after clear; concatenation guard will catch leftover text"
-        );
+        tracing::info!("toutiao 微头条: leftover draft image(s) purged via node-select delete");
     }
 
     // Chunked execCommand insertText (same trick as articles).

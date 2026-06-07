@@ -388,18 +388,18 @@ async fn run_publish_flow(
             break;
         }
         // Button still disabled after ~3s -> per-keystroke typing didn't hit
-        // Draft. Clear whatever (if anything) landed and re-fill via the
-        // untrusted-but-reliable execCommand path so the button can enable.
+        // Draft. Use the proven prototype path from scripts/twitter:
+        // focus + execCommand('insertText') in one page-side call. Do not
+        // precede it with selectAll/delete; that can desync Twitter's
+        // React/Draft model from the visible DOM and leave the model empty.
         if !execcommand_fallback_done && start.elapsed() > Duration::from_secs(3) {
             let fill_js = format!(
                 r#"(() => {{
                     const el = document.querySelector('[data-testid="tweetTextarea_0"]');
                     if (!el) return {{ ok: false }};
                     el.focus();
-                    document.execCommand('selectAll', false, null);
-                    document.execCommand('delete', false, null);
                     document.execCommand('insertText', false, {body_json});
-                    return {{ ok: true }};
+                    return {{ ok: true, text: (el.innerText || '').slice(0, 120) }};
                 }})()"#,
             );
             let fr = page.evaluate(&fill_js).await?;

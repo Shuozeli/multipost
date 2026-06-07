@@ -14,6 +14,7 @@ members = [
     "crates/multipost-publishers/twitter",
     "crates/multipost-crawlers/toutiao",
     "crates/multipost-crawlers/twitter",
+    "crates/multipost-crawlers/youtube",
 ]
 
 [workspace.package]
@@ -87,6 +88,7 @@ multipost-publishers-toutiao = { path = "crates/multipost-publishers/toutiao" }
 multipost-publishers-twitter = { path = "crates/multipost-publishers/twitter" }
 multipost-crawlers-toutiao = { path = "crates/multipost-crawlers/toutiao" }
 multipost-crawlers-twitter = { path = "crates/multipost-crawlers/twitter" }
+multipost-crawlers-youtube = { path = "crates/multipost-crawlers/youtube" }
 
 [profile.release]
 lto = "thin"

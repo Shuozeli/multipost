@@ -206,6 +206,13 @@ async fn run_crawl_job(
         source_urls,
         ..Default::default()
     };
+    let _permit = match state.crawl_permits.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(e) => {
+            fail(&state, job_id, &format!("crawl permit closed: {e}"));
+            return;
+        }
+    };
     let result = crawler.run(&opts).await;
 
     match result {
