@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-04T00:17:00Z -->
+<!-- agent-updated: 2026-06-09T05:02:03Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
@@ -21,6 +21,9 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
 - [x] **Profile stats** — `Stats` gRPC service + Toutiao/Twitter collectors;
   timestamped account + per-post snapshots (SQLite); CLI `stats collect/account/posts`.
   Toutiao pages the works feed (offset index, dedup by id); Twitter scrapes the profile.
+- [x] **YouTube cover + public video CLI** — `post --thumbnail` uploads a custom
+  YouTube thumbnail after the video lands; `post --public` is a shortcut for
+  `--privacy public`.
 - [x] **CI** — GitHub Actions: Build & Test / Clippy (-D warnings) / Format / Doc.
 - [x] **CLAUDE.md** — agent onboarding guide.
 

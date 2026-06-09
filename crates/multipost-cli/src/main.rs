@@ -150,6 +150,10 @@ enum Command {
         /// Path to a video file (required for video platforms).
         #[arg(long)]
         video: Option<PathBuf>,
+        /// Path to a custom thumbnail / cover image for video platforms.
+        /// Uploaded after --video and currently consumed by YouTube.
+        #[arg(long)]
+        thumbnail: Option<PathBuf>,
         /// Path to an image to attach. Repeatable:
         /// `--image a.png --image b.jpg`. Routes to the platform's
         /// image-post flow (Twitter tweet with photos, Toutiao 微头条
@@ -171,6 +175,9 @@ enum Command {
         /// Visibility: public, unlisted, private.
         #[arg(long, default_value = "private")]
         privacy: String,
+        /// Shortcut for `--privacy public`.
+        #[arg(long)]
+        public: bool,
     },
 }
 
@@ -374,11 +381,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Post {
             to,
             video,
+            thumbnail,
             image,
             title,
             description,
             tags,
             privacy,
+            public,
         } => {
             handle_post(
                 &cli.server,
@@ -386,11 +395,13 @@ async fn main() -> anyhow::Result<()> {
                 PostArgs {
                     to,
                     video,
+                    thumbnail,
                     images: image,
                     title,
                     description,
                     tags,
                     privacy,
+                    public,
                 },
             )
             .await
@@ -921,22 +932,26 @@ async fn upload_media(
 struct PostArgs {
     to: Vec<String>,
     video: Option<PathBuf>,
+    thumbnail: Option<PathBuf>,
     images: Vec<PathBuf>,
     title: String,
     description: String,
     tags: Vec<String>,
     privacy: String,
+    public: bool,
 }
 
 async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> anyhow::Result<()> {
     let PostArgs {
         to,
         video,
+        thumbnail,
         images,
         title,
         description,
         tags,
         privacy,
+        public,
     } = args;
     if to.is_empty() {
         anyhow::bail!("--to is required");
@@ -944,11 +959,15 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
     if video.is_some() && !images.is_empty() {
         anyhow::bail!("--video and --image are mutually exclusive");
     }
+    if thumbnail.is_some() && video.is_none() {
+        anyhow::bail!("--thumbnail requires --video");
+    }
     let target_platforms: Vec<ProtoPlatform> = to
         .iter()
         .map(|s| parse_platform(s))
         .collect::<anyhow::Result<_>>()?;
-    let vis = parse_visibility(&privacy)?;
+    let effective_privacy = if public { "public" } else { privacy.as_str() };
+    let vis = parse_visibility(effective_privacy)?;
 
     // Look up accounts to find IDs matching the requested platforms.
     let mut accounts_client = build_accounts(server, auth.clone()).await?;
@@ -982,11 +1001,14 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
         account_ids.push(matching[0].id.clone());
     }
 
-    // Upload media. --video and --image are mutually exclusive (guarded
-    // above); images upload in order so the platform attaches them in the
-    // same order the user listed them.
+    // Upload media. For video posts, the video stays first and an optional
+    // thumbnail follows it so publishers can preserve the existing media order
+    // contract without a proto change. Image posts upload in listed order.
     let mut media_ids: Vec<String> = Vec::new();
     if let Some(path) = &video {
+        media_ids.push(upload_media(server, auth.clone(), path).await?);
+    }
+    if let Some(path) = &thumbnail {
         media_ids.push(upload_media(server, auth.clone(), path).await?);
     }
     for path in &images {

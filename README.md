@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-04T00:17:00Z -->
+<!-- agent-updated: 2026-06-09T05:02:03Z -->
 # multipost
 
 A pure-Rust gRPC service for **cross-posting to social platforms**, plus
@@ -20,7 +20,7 @@ The server is a multi-tenant gRPC API; callers submit posts and either long-poll
 
 | Platform | Auth | Publish | Images | Confirm | Delete | Tested live |
 |---|---|---|---|---|---|---|
-| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | — | Polling | API delete | ✓ |
+| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | Custom thumbnail | Polling | API delete | ✓ |
 | **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | — | `freepublish/get` (partial) | API delete | ✓ draft path |
 | **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | — | Polls manage page | Clicks 删除作品 | ✓ |
 | **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor (CDP) | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ |
@@ -121,9 +121,11 @@ export MULTIPOST_API_KEY=<the-key>
 ./target/release/multipost accounts register-toutiao --cdp-url http://<chrome-host>:<port>
 ./target/release/multipost accounts register-twitter --cdp-url http://<chrome-host>:<port> --handle <handle>
 
-# 4. Post. Text, or images (--image is repeatable; mutually exclusive with --video).
+# 4. Post. Text, images (--image is repeatable), or video.
 ./target/release/multipost post --to wx-gzh --title "Hello world" --description "..."
 ./target/release/multipost post --to toutiao,twitter --description "今日速览" --image a.png --image b.jpg
+./target/release/multipost post --to youtube --video final.mp4 --thumbnail cover.jpg \
+  --title "昨夜星辰" --description "..." --public
 
 # 5. Watch the job to terminal.
 ./target/release/multipost watch <job-id>

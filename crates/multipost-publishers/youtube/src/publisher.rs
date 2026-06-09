@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use multipost_core::{
-    AuthStatus, Capabilities, ConfirmStatus, Content, ContentKind, Platform, PublishContext,
-    PublishError, PublishHandle, Publisher, Result, Visibility,
+    AuthStatus, Capabilities, ConfirmStatus, Content, ContentKind, MediaPayload, Platform,
+    PublishContext, PublishError, PublishHandle, Publisher, Result, Visibility,
 };
 
 use crate::API_BASE;
@@ -37,6 +37,34 @@ impl YouTubePublisher {
     /// Construct a new publisher.
     pub fn new(http: reqwest::Client, oauth: OAuthCredentials) -> Self {
         Self { http, oauth }
+    }
+
+    async fn upload_thumbnail(
+        &self,
+        access_token: &str,
+        video_id: &str,
+        thumbnail: &MediaPayload,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{UPLOAD_BASE}/thumbnails/set"))
+            .query(&[("videoId", video_id)])
+            .bearer_auth(access_token)
+            .header("Content-Type", &thumbnail.mime_type)
+            .header("Content-Length", thumbnail.bytes.len().to_string())
+            .body(thumbnail.bytes.clone())
+            .send()
+            .await
+            .map_err(|e| PublishError::Transient(format!("youtube thumbnail upload: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(PublishError::Other(anyhow::anyhow!(
+                "youtube thumbnail upload HTTP {status}: {body}"
+            )));
+        }
+        tracing::info!(video_id = %video_id, filename = %thumbnail.filename, "youtube: thumbnail uploaded");
+        Ok(())
     }
 }
 
@@ -131,6 +159,23 @@ fn extract_description(content: &Content) -> &str {
     } else {
         ""
     }
+}
+
+fn select_video_payload(media: &[MediaPayload]) -> Result<&MediaPayload> {
+    let video = media
+        .iter()
+        .find(|payload| payload.mime_type.starts_with("video/"))
+        .ok_or_else(|| PublishError::Rejected("YouTube needs a video media payload".into()))?;
+    if video.bytes.is_empty() {
+        return Err(PublishError::Rejected("video payload is empty".into()));
+    }
+    Ok(video)
+}
+
+fn select_thumbnail_payload(media: &[MediaPayload]) -> Option<&MediaPayload> {
+    media
+        .iter()
+        .find(|payload| payload.mime_type.starts_with("image/") && !payload.bytes.is_empty())
 }
 
 #[async_trait]
@@ -232,16 +277,8 @@ impl Publisher for YouTubePublisher {
                 content.kind
             )));
         }
-        let video = ctx
-            .media
-            .first()
-            .ok_or_else(|| {
-                PublishError::Rejected("YouTube needs at least one media payload".into())
-            })?
-            .clone();
-        if video.bytes.is_empty() {
-            return Err(PublishError::Rejected("video payload is empty".into()));
-        }
+        let video = select_video_payload(&ctx.media)?;
+        let thumbnail = select_thumbnail_payload(&ctx.media);
         let access_token = read_access_token(ctx.credentials)?;
 
         let title = extract_title(content);
@@ -307,7 +344,7 @@ impl Publisher for YouTubePublisher {
             .put(&upload_url)
             .header("Content-Type", &video.mime_type)
             .header("Content-Length", video.bytes.len().to_string())
-            .body(video.bytes)
+            .body(video.bytes.clone())
             .send()
             .await
             .map_err(|e| PublishError::Transient(format!("youtube upload PUT: {e}")))?;
@@ -333,6 +370,10 @@ impl Publisher for YouTubePublisher {
             .to_string();
 
         tracing::info!(video_id = %video_id, "youtube: upload complete");
+        if let Some(thumbnail) = thumbnail {
+            self.upload_thumbnail(access_token, &video_id, thumbnail)
+                .await?;
+        }
         let permalink = Some(format!("https://youtu.be/{video_id}"));
         Ok(PublishHandle {
             external_id: video_id,
@@ -481,6 +522,47 @@ mod tests {
         assert_eq!(visibility_to_privacy(Visibility::Private), "private");
         assert_eq!(visibility_to_privacy(Visibility::Unlisted), "unlisted");
         assert_eq!(visibility_to_privacy(Visibility::Followers), "unlisted");
+    }
+
+    #[test]
+    fn selects_video_and_thumbnail_payloads_by_mime_type() {
+        let payloads = vec![
+            MediaPayload {
+                filename: "notes.txt".into(),
+                mime_type: "text/plain".into(),
+                bytes: b"ignored".to_vec(),
+            },
+            MediaPayload {
+                filename: "clip.mp4".into(),
+                mime_type: "video/mp4".into(),
+                bytes: vec![1, 2, 3],
+            },
+            MediaPayload {
+                filename: "cover.jpg".into(),
+                mime_type: "image/jpeg".into(),
+                bytes: vec![4, 5, 6],
+            },
+        ];
+
+        assert_eq!(
+            select_video_payload(&payloads).unwrap().filename,
+            "clip.mp4"
+        );
+        assert_eq!(
+            select_thumbnail_payload(&payloads).unwrap().filename,
+            "cover.jpg"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_video_payload() {
+        let payloads = vec![MediaPayload {
+            filename: "cover.jpg".into(),
+            mime_type: "image/jpeg".into(),
+            bytes: vec![1],
+        }];
+
+        assert!(select_video_payload(&payloads).is_err());
     }
 
     #[test]
