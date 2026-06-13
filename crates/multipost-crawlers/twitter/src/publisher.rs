@@ -1,6 +1,7 @@
 //! [`Crawler`] impl for Twitter / X — captures HomeTimeline by
 //! driving `pwright network-listen --include-body` on a fresh nav to
-//! `https://x.com/home`.
+//! `https://x.com/home` or, when `MULTIPOST_TWITTER_CRAWL_FEED=following`,
+//! `https://x.com/home?f=following`.
 //!
 //! Unlike Toutiao, Twitter fires HomeTimeline only on full-page
 //! navigation in our observed behavior, so we do **not** scroll the
@@ -20,14 +21,16 @@ use tracing::{debug, warn};
 
 use crate::parser::decode_twitter_timeline;
 
-/// Twitter / X "For you" feed crawler.
+/// Twitter / X feed crawler.
 #[derive(Debug, Default, Clone)]
 pub struct TwitterCrawler;
 
-const HOME_URL: &str = "https://x.com/home";
+const FOR_YOU_HOME_URL: &str = "https://x.com/home";
+const FOLLOWING_HOME_URL: &str = "https://x.com/home?f=following";
 const NOOP_URL: &str = "about:blank";
 const FEED_URL_SUBSTRING: &str = "/HomeTimeline";
 const TWEET_DETAIL_URL_SUBSTRING: &str = "/TweetDetail";
+const TWITTER_CRAWL_FEED_ENV: &str = "MULTIPOST_TWITTER_CRAWL_FEED";
 
 impl TwitterCrawler {
     /// Build a new crawler. No setup is performed until [`run`].
@@ -61,10 +64,30 @@ impl Crawler for TwitterCrawler {
         //    same-route navigations as no-ops).
         pwright_run(opts, &["open", NOOP_URL]).await?;
 
-        let items = capture_twitter_responses(opts, FEED_URL_SUBSTRING, HOME_URL).await;
+        let items = capture_twitter_responses(opts, FEED_URL_SUBSTRING, twitter_home_url()).await;
         close_current_tab(opts).await;
         let items = items?;
         Ok(dedup_keep_last(items))
+    }
+}
+
+fn twitter_home_url() -> &'static str {
+    match std::env::var(TWITTER_CRAWL_FEED_ENV) {
+        Ok(feed) if feed.eq_ignore_ascii_case("following") => FOLLOWING_HOME_URL,
+        Ok(feed)
+            if feed.eq_ignore_ascii_case("for_you")
+                || feed.eq_ignore_ascii_case("for-you")
+                || feed.eq_ignore_ascii_case("home") =>
+        {
+            FOR_YOU_HOME_URL
+        }
+        Ok(feed) if !feed.trim().is_empty() => {
+            warn!(
+                "{TWITTER_CRAWL_FEED_ENV}={feed:?} is not recognized; using Twitter For You feed"
+            );
+            FOR_YOU_HOME_URL
+        }
+        _ => FOR_YOU_HOME_URL,
     }
 }
 

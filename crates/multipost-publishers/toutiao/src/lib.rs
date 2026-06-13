@@ -14,6 +14,7 @@ pub mod cdp;
 pub mod credentials;
 pub mod publisher;
 pub mod selectors;
+mod staging;
 pub mod stats;
 
 pub use credentials::ToutiaoCredentials;

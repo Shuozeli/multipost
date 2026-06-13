@@ -145,8 +145,12 @@ enum Command {
     /// Submit content for publishing.
     Post {
         /// One platform name per --to: youtube, wx-gzh, twitter, douyin.
-        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
         to: Vec<String>,
+        /// Explicit account ID to publish to. Repeatable. Use this when
+        /// multiple accounts exist on the same platform.
+        #[arg(long = "account-id")]
+        account_ids: Vec<String>,
         /// Path to a video file (required for video platforms).
         #[arg(long)]
         video: Option<PathBuf>,
@@ -178,6 +182,24 @@ enum Command {
         /// Shortcut for `--privacy public`.
         #[arg(long)]
         public: bool,
+    },
+    /// Verify whether a published platform URL is publicly available.
+    Verify {
+        #[command(subcommand)]
+        action: VerifyAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VerifyAction {
+    /// Verify a YouTube watch URL or video id without using the multipost server.
+    Youtube {
+        /// YouTube video id, e.g. NfbjHERIyRE.
+        #[arg(long)]
+        video_id: Option<String>,
+        /// YouTube watch / youtu.be URL.
+        #[arg(long)]
+        url: Option<String>,
     },
 }
 
@@ -299,6 +321,22 @@ enum AccountsAction {
         /// Chrome DevTools Protocol HTTP endpoint.
         #[arg(long)]
         cdp_url: String,
+        /// SSH host where Chrome runs. Required for remote video upload
+        /// staging; optional for article/微头条.
+        #[arg(long, default_value = "")]
+        ssh_host: String,
+        /// SSH username on `--ssh-host`.
+        #[arg(long, default_value = "")]
+        ssh_user: String,
+        /// Optional SSH password. If set, staging uses `sshpass`.
+        #[arg(long, default_value = "")]
+        ssh_password: String,
+        /// SSH port on `--ssh-host`. Omit for 22.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+        /// Directory on the Chrome host for staged video uploads.
+        #[arg(long, default_value = "C:/Users/cyuan/Videos/multipost-uploads")]
+        remote_temp_dir: String,
         /// Optional cached display name.
         #[arg(long, default_value = "")]
         nickname: String,
@@ -319,6 +357,35 @@ enum AccountsAction {
         /// Optional cached display name.
         #[arg(long, default_value = "")]
         display_name: String,
+    },
+    /// Register a YouTube Studio account by the CDP endpoint of a Chrome
+    /// profile that's already logged into studio.youtube.com.
+    RegisterYoutubeStudio {
+        /// Chrome DevTools Protocol HTTP endpoint.
+        #[arg(long)]
+        cdp_url: String,
+        /// SSH host where Chrome runs. Required when Chrome is remote so
+        /// video files can be staged before DOM.setFileInputFiles.
+        #[arg(long, default_value = "")]
+        ssh_host: String,
+        /// SSH username on `--ssh-host`.
+        #[arg(long, default_value = "")]
+        ssh_user: String,
+        /// Optional SSH password. If set, staging uses `sshpass`.
+        #[arg(long, default_value = "")]
+        ssh_password: String,
+        /// SSH port on `--ssh-host`. Omit for 22.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+        /// Directory on the Chrome host for staged uploads.
+        #[arg(long, default_value = "C:/Users/cyuan/Videos/multipost-uploads")]
+        remote_temp_dir: String,
+        /// Optional cached channel display name.
+        #[arg(long, default_value = "")]
+        display_name: String,
+        /// Optional cached channel handle, e.g. `@newfinnews`.
+        #[arg(long, default_value = "")]
+        handle: String,
     },
 }
 
@@ -378,8 +445,10 @@ async fn main() -> anyhow::Result<()> {
             handle_discovered(&cli.server, auth, platform, limit).await
         }
         Command::Stats { action } => handle_stats(&cli.server, auth, action).await,
+        Command::Verify { action } => handle_verify(action).await,
         Command::Post {
             to,
+            account_ids,
             video,
             thumbnail,
             image,
@@ -394,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
                 auth,
                 PostArgs {
                     to,
+                    account_ids,
                     video,
                     thumbnail,
                     images: image,
@@ -407,6 +477,90 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
     }
+}
+
+async fn handle_verify(action: VerifyAction) -> anyhow::Result<()> {
+    match action {
+        VerifyAction::Youtube { video_id, url } => {
+            let id = match (video_id, url) {
+                (Some(id), None) => id,
+                (None, Some(url)) => extract_youtube_video_id(&url)?,
+                (Some(_), Some(_)) => anyhow::bail!("pass only one of --video-id or --url"),
+                (None, None) => anyhow::bail!("pass --video-id or --url"),
+            };
+            let http = reqwest::Client::new();
+            let result = multipost_publishers_youtube::verify_public_video(&http, &id)
+                .await
+                .map_err(|e| anyhow::anyhow!("youtube verify failed: {e}"))?;
+            println!("video_id:    {}", result.video_id);
+            println!("url:         {}", result.url);
+            println!("public:      {}", result.is_publicly_available());
+            println!("playable:    {}", result.playable);
+            println!("is_private:  {}", fmt_opt_bool(result.is_private));
+            if let Some(status) = &result.playability_status {
+                println!("status:      {status}");
+            }
+            if let Some(title) = &result.title {
+                println!("title:       {title}");
+            }
+            if let Some(owner) = &result.owner_channel_name {
+                println!("channel:     {owner}");
+            }
+            if let Some(reason) = &result.reason {
+                println!("reason:      {reason}");
+            }
+            if !result.is_publicly_available() {
+                anyhow::bail!("YouTube video is not publicly playable");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn fmt_opt_bool(v: Option<bool>) -> &'static str {
+    match v {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
+fn extract_youtube_video_id(url: &str) -> anyhow::Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty YouTube URL");
+    }
+    if let Some((_, rest)) = trimmed.split_once("youtu.be/") {
+        let id = take_youtube_id(rest);
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    if let Some((_, query)) = trimmed.split_once('?') {
+        for part in query.split('&') {
+            if let Some((key, value)) = part.split_once('=')
+                && key == "v"
+            {
+                let id = take_youtube_id(value);
+                if !id.is_empty() {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Ok(trimmed.to_string());
+    }
+    anyhow::bail!("could not extract YouTube video id from {url:?}");
+}
+
+fn take_youtube_id(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
 }
 
 /// Outgoing auth interceptor — injects `Authorization: Bearer <api_key>`
@@ -820,11 +974,21 @@ async fn handle_accounts(
         }
         AccountsAction::RegisterToutiao {
             cdp_url,
+            ssh_host,
+            ssh_user,
+            ssh_password,
+            ssh_port,
+            remote_temp_dir,
             nickname,
             toutiao_id,
         } => {
             let creds = serde_json::json!({
                 "cdp_url": cdp_url,
+                "ssh_host": ssh_host,
+                "ssh_user": ssh_user,
+                "ssh_password": ssh_password,
+                "ssh_port": ssh_port,
+                "remote_temp_dir": remote_temp_dir,
                 "nickname": nickname,
                 "toutiao_id": toutiao_id,
             })
@@ -868,6 +1032,43 @@ async fn handle_accounts(
             println!("  display_name: {}", resp.display_name);
             if !resp.external_id.is_empty() {
                 println!("  handle:       @{}", resp.external_id);
+            }
+        }
+        AccountsAction::RegisterYoutubeStudio {
+            cdp_url,
+            ssh_host,
+            ssh_user,
+            ssh_password,
+            ssh_port,
+            remote_temp_dir,
+            display_name,
+            handle,
+        } => {
+            let creds = serde_json::json!({
+                "kind": "studio_cdp",
+                "cdp_url": cdp_url,
+                "ssh_host": ssh_host,
+                "ssh_user": ssh_user,
+                "ssh_password": ssh_password,
+                "ssh_port": ssh_port,
+                "remote_temp_dir": remote_temp_dir,
+                "display_name": display_name,
+                "handle": handle,
+            })
+            .to_string();
+            let resp = client
+                .register_developer_credentials(RegisterDeveloperRequest {
+                    platform: ProtoPlatform::Youtube as i32,
+                    credentials_json: creds,
+                })
+                .await
+                .context("Accounts.RegisterDeveloperCredentials rpc")?
+                .into_inner();
+            println!("✓ YouTube Studio account registered");
+            println!("  id:           {}", resp.id);
+            println!("  display_name: {}", resp.display_name);
+            if !resp.external_id.is_empty() {
+                println!("  external_id:  {}", resp.external_id);
             }
         }
     }
@@ -931,6 +1132,7 @@ async fn upload_media(
 /// clippy's argument-count limit.
 struct PostArgs {
     to: Vec<String>,
+    account_ids: Vec<String>,
     video: Option<PathBuf>,
     thumbnail: Option<PathBuf>,
     images: Vec<PathBuf>,
@@ -944,6 +1146,7 @@ struct PostArgs {
 async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> anyhow::Result<()> {
     let PostArgs {
         to,
+        account_ids: explicit_account_ids,
         video,
         thumbnail,
         images,
@@ -953,8 +1156,8 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
         privacy,
         public,
     } = args;
-    if to.is_empty() {
-        anyhow::bail!("--to is required");
+    if to.is_empty() && explicit_account_ids.is_empty() {
+        anyhow::bail!("at least one of --to or --account-id is required");
     }
     if video.is_some() && !images.is_empty() {
         anyhow::bail!("--video and --image are mutually exclusive");
@@ -978,7 +1181,7 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
         .into_inner()
         .accounts;
 
-    let mut account_ids: Vec<String> = Vec::new();
+    let mut account_ids: Vec<String> = explicit_account_ids;
     for p in &target_platforms {
         let matching: Vec<&_> = accounts
             .iter()
@@ -1317,4 +1520,29 @@ async fn handle_cancel(server: &str, auth: AuthInterceptor, job_id: String) -> a
         println!("  ext_id: {}", resp.external_id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_youtube_id_from_watch_url() {
+        let got = extract_youtube_video_id("https://www.youtube.com/watch?v=NfbjHERIyRE&t=1")
+            .expect("watch url should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
+
+    #[test]
+    fn extracts_youtube_id_from_short_url() {
+        let got = extract_youtube_video_id("https://youtu.be/NfbjHERIyRE?si=abc")
+            .expect("short url should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
+
+    #[test]
+    fn accepts_bare_youtube_id() {
+        let got = extract_youtube_video_id("NfbjHERIyRE").expect("bare id should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
 }

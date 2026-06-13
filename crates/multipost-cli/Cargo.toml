@@ -13,9 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 multipost-proto.workspace = true
+multipost-publishers-youtube.workspace = true
 multipost-storage.workspace = true
 tonic.workspace = true
 prost.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
 chrono.workspace = true

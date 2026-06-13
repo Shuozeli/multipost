@@ -15,7 +15,7 @@ use clap::Parser;
 use tonic::transport::Server;
 use tracing::{Level, info};
 
-use multipost_core::Platform;
+use multipost_core::{Content, Platform, Visibility};
 use multipost_crawlers_toutiao::ToutiaoCrawler;
 use multipost_crawlers_twitter::TwitterCrawler;
 use multipost_crawlers_youtube::YouTubeCrawler;
@@ -135,16 +135,19 @@ async fn main() -> anyhow::Result<()> {
     // Build publishers. Each one is created once per platform and reused
     // across all accounts on that platform.
     let mut publishers: HashMap<Platform, Arc<dyn multipost_core::Publisher>> = HashMap::new();
-    if let Some(yt_oauth) = oauth.youtube.clone() {
-        publishers.insert(
-            Platform::YouTube,
-            Arc::new(YouTubePublisher::new(reqwest::Client::new(), yt_oauth)),
-        );
-        info!("YouTube publisher registered");
+    publishers.insert(
+        Platform::YouTube,
+        Arc::new(YouTubePublisher::new(
+            reqwest::Client::new(),
+            oauth.youtube.clone(),
+        )),
+    );
+    if oauth.youtube.is_some() {
+        info!("YouTube publisher registered (OAuth + Studio CDP)");
     } else {
         info!(
             "YouTube OAuth NOT configured \
-             (set MULTIPOST_YOUTUBE_CLIENT_ID + MULTIPOST_YOUTUBE_CLIENT_SECRET to enable)"
+             (set MULTIPOST_YOUTUBE_CLIENT_ID + MULTIPOST_YOUTUBE_CLIENT_SECRET to enable Data API; Studio CDP accounts still work)"
         );
     }
     // WxGzh has no global config — credentials come from each account.
@@ -352,6 +355,9 @@ async fn recover_confirming_jobs(state: &std::sync::Arc<AppState>) {
                 permalink: job.permalink.clone(),
             },
             account_id,
+            requested_visibility: serde_json::from_value::<Content>(job.content.clone())
+                .map(|content| content.visibility)
+                .unwrap_or(Visibility::Private),
         };
         tracing::info!(%job_id, %account_id, "startup recovery: spawn confirm-poll");
         let st = state.clone();

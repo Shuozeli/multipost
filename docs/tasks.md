@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-09T05:02:03Z -->
+<!-- agent-updated: 2026-06-13T08:52:18Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
@@ -24,6 +24,29 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
 - [x] **YouTube cover + public video CLI** — `post --thumbnail` uploads a custom
   YouTube thumbnail after the video lands; `post --public` is a shortcut for
   `--privacy public`.
+- [x] **YouTube Studio CDP fallback** — YouTube accounts can now be registered
+  with `accounts register-youtube-studio` and publish via a logged-in Studio
+  Chrome profile when OAuth/Data API credentials are unavailable.
+- [x] **YouTube Studio false-success guard** — Studio publishing now requires a
+  concrete `youtu.be/<id>` upload-result link before returning a handle; Studio
+  public uploads click the final `Publish` button instead of the draft `Save`
+  path, and confirm now verifies the unauthenticated watch page is playable and
+  not private before marking the job confirmed. Public YouTube jobs also run the
+  same anonymous watch-page check after publisher confirmation, and confirm-poll
+  timeout now marks the job `Failed` instead of silently leaving it in
+  `Confirming`. CLI `verify youtube --video-id` / `--url` exposes the same
+  public-page check for post-publish audits.
+- [x] **Douyin video publisher** — `crates/multipost-publishers/douyin/` stages
+  video files onto the Chrome host over SCP, uploads via `DOM.setFileInputFiles`,
+  waits for upload completion before clicking `发布`, selects requested
+  visibility, confirms on the creator manage page, and supports delete by title.
+- [ ] **Toutiao video publishing final submit** — `LongVideo` / `ShortVideo`
+  can stage the file and fill `/profile_v4/xigua/upload-video` fields, but the
+  final `发布` UI action currently does not submit even with real CDP clicks and
+  direct React handler invocation; needs further reverse engineering.
+- [x] **Explicit post account selection** — `post --account-id` bypasses the
+  single-account-per-platform picker limitation when multiple Toutiao accounts
+  are connected.
 - [x] **CI** — GitHub Actions: Build & Test / Clippy (-D warnings) / Format / Doc.
 - [x] **CLAUDE.md** — agent onboarding guide.
 
@@ -133,13 +156,13 @@ Goal: `multipost-cli accounts list` returns `[]` against a running `multipost-se
 
 ## Phase 4 — Douyin publisher (pwright)
 
-- [ ] Discovery script (`scripts/douyin/01_explore.py`) — login flow, upload selectors
-- [ ] `crates/multipost-publishers/douyin/` skeleton
-- [ ] First-time QR-code login flow
-- [ ] Video file upload via the `creator.douyin.com` web UI
-- [ ] Caption + hashtag fill
-- [ ] Capture published video URL
-- [ ] End-to-end: `multipost-cli post --to douyin --video clip.mp4` works
+- [x] Discovery/probe scripts mapped login, upload selectors, and form behavior.
+- [x] `crates/multipost-publishers/douyin/` publisher implemented.
+- [x] Browser-cookie auth via a pre-logged-in Chrome CDP endpoint.
+- [x] Video file upload via the `creator.douyin.com` web UI.
+- [x] Caption / hashtag body fill through the description editor.
+- [x] Manage-page confirmation implemented by matching the work title and row status.
+- [x] End-to-end CLI path available through `multipost post --to douyin --video clip.mp4 --public`.
 
 ## Phase 5+
 
@@ -160,4 +183,4 @@ Tracked separately when we get there. See `docs/design.md` §18 for the full lad
 | YouTube | `scripts/youtube/` | ✓ Full lifecycle: upload → privacy update → delete | 2026-05-15 |
 | WeChat MP | `scripts/wechat-mp/` | ✓ Draft creation; freepublish/submit not yet test-fired | 2026-05-15 |
 | Twitter | `scripts/twitter/` | ✓ Compose-and-post via pwright; final post click unfired | 2026-05-15 |
-| Douyin | (none yet) | ⏳ Phase 4 starts with discovery scripts | — |
+| Douyin | `crates/multipost-publishers/douyin/` | ✓ CDP upload, upload-complete wait, manage-page confirm, delete by title | 2026-06-05 |

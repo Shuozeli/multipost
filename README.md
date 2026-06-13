@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-09T05:02:03Z -->
+<!-- agent-updated: 2026-06-09T06:38:49Z -->
 # multipost
 
 A pure-Rust gRPC service for **cross-posting to social platforms**, plus
@@ -20,10 +20,10 @@ The server is a multi-tenant gRPC API; callers submit posts and either long-poll
 
 | Platform | Auth | Publish | Images | Confirm | Delete | Tested live |
 |---|---|---|---|---|---|---|
-| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | Custom thumbnail | Polling | API delete | ✓ |
+| **YouTube** | OAuth 2.0 + PKCE, or Studio Chrome cookies | Video upload (Data API v3 or Studio CDP) | Custom thumbnail | Polling / Studio completion | API delete / manual Studio delete | ✓ |
 | **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | — | `freepublish/get` (partial) | API delete | ✓ draft path |
 | **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | — | Polls manage page | Clicks 删除作品 | ✓ |
-| **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor (CDP) | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ |
+| **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor; video upload form fill is mapped but final publish is blocked by UI submit behavior | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ text/image |
 | **Twitter / X** | Chrome profile cookies | Inline composer (CDP) | ✓ tweet (≤4) | Immediate | caret → Delete | ✓ |
 
 Images on the cookie-auth platforms are streamed into the remote Chrome over CDP
@@ -49,10 +49,10 @@ multipost/
     ├── multipost-storage      JSON repos (accounts/jobs/media/tenants) + SQLite (discovered, stats)
     ├── multipost-orchestrator job state machine types
     ├── multipost-publishers/
-    │   ├── youtube            API   (OAuth + resumable upload)
+    │   ├── youtube            API/CDP (OAuth resumable upload + Studio browser fallback)
     │   ├── wx-gzh             API   (stable_token + draft/add + freepublish)
     │   ├── douyin             CDP   (SCP staging + DOM.setFileInputFiles)
-    │   ├── toutiao            CDP   (editor + 微头条 + images; + stats collector)
+    │   ├── toutiao            CDP   (video upload + editor + 微头条 + images; + stats collector)
     │   └── twitter            CDP   (inline composer + images; + stats collector)
     ├── multipost-crawlers/
     │   ├── toutiao            pwright network-listen → decode 推荐 feed
@@ -120,12 +120,19 @@ export MULTIPOST_API_KEY=<the-key>
 # 3b. Cookie-auth platforms point at a Chrome already logged into the account.
 ./target/release/multipost accounts register-toutiao --cdp-url http://<chrome-host>:<port>
 ./target/release/multipost accounts register-twitter --cdp-url http://<chrome-host>:<port> --handle <handle>
+./target/release/multipost accounts register-youtube-studio \
+  --cdp-url http://<chrome-host>:<port> \
+  --ssh-host <chrome-host> --ssh-user <user> \
+  --display-name "Channel Name" --handle "@channelhandle"
 
 # 4. Post. Text, images (--image is repeatable), or video.
 ./target/release/multipost post --to wx-gzh --title "Hello world" --description "..."
 ./target/release/multipost post --to toutiao,twitter --description "今日速览" --image a.png --image b.jpg
 ./target/release/multipost post --to youtube --video final.mp4 --thumbnail cover.jpg \
   --title "昨夜星辰" --description "..." --public
+./target/release/multipost post \
+  --account-id <toutiao-account-id> --account-id <douyin-account-id> \
+  --video final.mp4 --title "今日视频标题" --description "..." --public
 
 # 5. Watch the job to terminal.
 ./target/release/multipost watch <job-id>

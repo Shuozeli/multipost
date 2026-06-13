@@ -85,3 +85,20 @@ pub const WEITOUTIAO_INSERT_CONFIRM_LABEL: &str = "确定";
 
 /// 微头条 accepts up to 9 images per post.
 pub const WEITOUTIAO_MAX_IMAGES: usize = 9;
+
+// ---- 头条视频 / 西瓜视频 upload editor ----
+
+/// Direct URL to the video upload editor.
+pub const VIDEO_UPLOAD_URL: &str = "https://mp.toutiao.com/profile_v4/xigua/upload-video";
+
+/// Hidden video file input in the upload editor.
+pub const VIDEO_FILE_INPUT: &str = r#"input[type="file"][accept*="video"]"#;
+
+/// Video title input placeholder.
+pub const VIDEO_TITLE_INPUT: &str = r#"input[placeholder*="1～30"], input[placeholder*="1-30"]"#;
+
+/// Video description textarea placeholder.
+pub const VIDEO_DESCRIPTION_TEXTAREA: &str = r#"textarea[placeholder*="视频简介"]"#;
+
+/// Video publish button label.
+pub const VIDEO_PUBLISH_LABEL: &str = "发布";

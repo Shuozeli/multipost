@@ -1,9 +1,11 @@
-//! Crawler for the Twitter / X `For you` (HomeTimeline) feed.
+//! Crawler for the Twitter / X `For you` / `Following` HomeTimeline feed.
 //!
 //! Captures `https://x.com/i/api/graphql/<hash>/HomeTimeline`
 //! responses by driving `pwright network-listen --include-body` while
-//! navigating to `https://x.com/home`. Decodes each response into
-//! normalized [`DiscoveredItem`]s.
+//! navigating to `https://x.com/home` by default, or
+//! `https://x.com/home?f=following` when
+//! `MULTIPOST_TWITTER_CRAWL_FEED=following`. Decodes each response
+//! into normalized [`DiscoveredItem`]s.
 //!
 //! Unlike Toutiao, Twitter only fires HomeTimeline on full-page
 //! navigation — subsequent scroll mostly hydrates from the already-

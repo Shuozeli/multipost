@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use crate::cdp::{BrowserSession, PageSession};
 use crate::credentials::ToutiaoCredentials;
 use crate::selectors;
+use crate::staging::{cleanup_file, stage_file};
 
 /// Toutiao publisher. Stateless — all per-account config lives in
 /// `PublishContext::credentials`.
@@ -87,8 +88,8 @@ impl Publisher for ToutiaoPublisher {
             // publish_weitoutiao). Article inline images are a separate,
             // unbuilt path.
             max_images: Some(selectors::WEITOUTIAO_MAX_IMAGES),
-            video_supported: false,
-            video_max_seconds: None,
+            video_supported: true,
+            video_max_seconds: Some(3 * 3600),
             schedule_supported: false,
             edit_supported: false,
             delete_supported: true,
@@ -130,14 +131,13 @@ impl Publisher for ToutiaoPublisher {
         let creds = parse_credentials(ctx.credentials)?;
         match content.kind {
             multipost_core::ContentKind::Article => publish_article(&creds, content).await,
+            multipost_core::ContentKind::LongVideo | multipost_core::ContentKind::ShortVideo => {
+                publish_video(&creds, content, &ctx.media).await
+            }
             multipost_core::ContentKind::Text => publish_weitoutiao(&creds, content, &[]).await,
             multipost_core::ContentKind::Image | multipost_core::ContentKind::Carousel => {
                 publish_weitoutiao(&creds, content, &ctx.media).await
             }
-            other => Err(PublishError::Rejected(format!(
-                "toutiao: ContentKind::{other:?} not supported \
-                 (Article → graphic editor, Text → 微头条, Image/Carousel → 微头条 with images)"
-            ))),
         }
     }
 
@@ -1208,6 +1208,422 @@ async fn fill_body(page: &mut PageSession, body: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn publish_video(
+    creds: &ToutiaoCredentials,
+    content: &Content,
+    media: &[MediaPayload],
+) -> Result<PublishHandle> {
+    let video = media
+        .iter()
+        .find(|m| m.mime_type.starts_with("video/"))
+        .ok_or_else(|| PublishError::Rejected("toutiao video requires one video payload".into()))?;
+    if video.bytes.is_empty() {
+        return Err(PublishError::Rejected(
+            "toutiao video payload is empty".into(),
+        ));
+    }
+    let (title, description) = split_video_title_body(&content.text);
+    if title.is_empty() {
+        return Err(PublishError::Rejected(
+            "toutiao video title cannot be empty".into(),
+        ));
+    }
+
+    let local = write_local_media_tempfile("multipost-toutiao-video-", video)
+        .await
+        .map_err(|e| PublishError::Other(anyhow::anyhow!("toutiao local video stage: {e}")))?;
+    let staged = stage_file(creds, &local)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video stage: {e}")))?;
+    tracing::info!(remote = %staged.remote_path, "toutiao video: staged video on chrome host");
+
+    let outcome =
+        drive_video_upload(creds, &staged.remote_path, &title, &description, content).await;
+    let _ = cleanup_file(creds, &staged).await;
+    let _ = tokio::fs::remove_file(&local).await;
+    outcome.map(|permalink| PublishHandle {
+        external_id: title,
+        permalink: Some(permalink),
+    })
+}
+
+async fn drive_video_upload(
+    creds: &ToutiaoCredentials,
+    remote_video_path: &str,
+    title: &str,
+    description: &str,
+    content: &Content,
+) -> Result<String> {
+    let session = BrowserSession::connect(&creds.cdp_url)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video connect: {e}")))?;
+    let tab = session
+        .create_tab(selectors::VIDEO_UPLOAD_URL)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video open tab: {e}")))?;
+    tracing::info!(target = %tab.id, "toutiao video: opened upload tab");
+    let mut page = session
+        .open_page(&tab)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video open page: {e}")))?;
+    let result =
+        run_video_upload_flow(&mut page, remote_video_path, title, description, content).await;
+    if result.is_ok() {
+        let _ = session.close_tab(&tab.id).await;
+    }
+    result
+}
+
+async fn run_video_upload_flow(
+    page: &mut PageSession,
+    remote_video_path: &str,
+    title: &str,
+    description: &str,
+    content: &Content,
+) -> Result<String> {
+    page.bring_to_front()
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video foreground: {e}")))?;
+    let input = wait_for_node(page, selectors::VIDEO_FILE_INPUT, Duration::from_secs(45))
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video input: {e}")))?;
+    page.set_file_input_files(input, &[remote_video_path.to_string()])
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video set input: {e}")))?;
+    wait_for_video_editor(page, Duration::from_secs(300))
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video editor: {e}")))?;
+    fill_video_title(page, title)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video title: {e}")))?;
+    fill_video_description(page, description)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video description: {e}")))?;
+    select_video_visibility(page, content.visibility)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video visibility: {e}")))?;
+    select_video_declaration(page)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video declaration: {e}")))?;
+    dismiss_video_tips(page).await.ok();
+    wait_for_video_publish_enabled(page, Duration::from_secs(180))
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video publish enable: {e}")))?;
+    click_video_publish(page)
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video publish click: {e}")))?;
+    wait_for_video_publish_result(page, Duration::from_secs(120))
+        .await
+        .map_err(|e| PublishError::Transient(format!("toutiao video publish result: {e}")))
+}
+
+async fn wait_for_video_editor(page: &mut PageSession, deadline: Duration) -> anyhow::Result<()> {
+    let start = Instant::now();
+    loop {
+        let text = page
+            .evaluate("document.body.innerText || ''")
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if text.contains("上传失败") {
+            anyhow::bail!("Toutiao video upload failed");
+        }
+        if text.contains("上传成功") && text.contains("基本信息") && text.contains("视频简介")
+        {
+            return Ok(());
+        }
+        if start.elapsed() > deadline {
+            let head: String = text.chars().take(240).collect();
+            anyhow::bail!("timed out waiting for Toutiao video editor; last text={head}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn wait_for_node(
+    page: &mut PageSession,
+    selector: &str,
+    deadline: Duration,
+) -> anyhow::Result<u64> {
+    let start = Instant::now();
+    loop {
+        let doc = match page.get_document().await {
+            Ok(doc) => doc,
+            Err(_) if start.elapsed() <= deadline => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        match page.query_selector(doc, selector).await {
+            Ok(0) => {
+                if start.elapsed() > deadline {
+                    anyhow::bail!("timed out waiting for selector {selector:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Ok(node) => return Ok(node),
+            Err(e) => {
+                if start.elapsed() > deadline {
+                    return Err(e);
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
+async fn fill_video_title(page: &mut PageSession, title: &str) -> anyhow::Result<()> {
+    let title_json = serde_json::to_string(title)?;
+    let js = format!(
+        r#"(() => {{
+            const inputs = [...document.querySelectorAll('input')].filter(i => i.offsetParent !== null);
+            const el = inputs.find(i => (i.placeholder || '').includes('30') || (i.placeholder || '').includes('字符')) || inputs[0];
+            if (!el) return {{ok:false}};
+            el.focus();
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            setter.call(el, '');
+            el.dispatchEvent(new InputEvent('input', {{bubbles:true, inputType:'deleteContentBackward', data:null}}));
+            setter.call(el, {title_json});
+            el.dispatchEvent(new InputEvent('input', {{bubbles:true, inputType:'insertText', data:{title_json}}}));
+            el.dispatchEvent(new Event('blur', {{bubbles:true}}));
+            el.dispatchEvent(new Event('input', {{bubbles:true}}));
+            el.dispatchEvent(new Event('change', {{bubbles:true}}));
+            return {{ok:true, value: el.value, placeholder: el.placeholder}};
+        }})()"#
+    );
+    let r = page.evaluate(&js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("could not fill Toutiao video title: {r}");
+    }
+    let observed = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    if observed != title {
+        anyhow::bail!("Toutiao video title did not stick: {r}");
+    }
+    Ok(())
+}
+
+async fn fill_video_description(page: &mut PageSession, description: &str) -> anyhow::Result<()> {
+    if description.trim().is_empty() {
+        return Ok(());
+    }
+    let desc: String = description.chars().take(400).collect();
+    let desc_json = serde_json::to_string(&desc)?;
+    let js = format!(
+        r#"(() => {{
+            const el = [...document.querySelectorAll('textarea')]
+                .find(t => (t.placeholder || '').includes('视频简介')) || document.querySelector('textarea');
+            if (!el) return {{ok:false}};
+            el.focus();
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(el, {desc_json});
+            el.dispatchEvent(new InputEvent('input', {{bubbles:true, inputType:'insertText', data:{desc_json}}}));
+            el.dispatchEvent(new Event('blur', {{bubbles:true}}));
+            el.dispatchEvent(new Event('change', {{bubbles:true}}));
+            return {{ok:true, value: el.value}};
+        }})()"#
+    );
+    let r = page.evaluate(&js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("could not fill Toutiao video description: {r}");
+    }
+    Ok(())
+}
+
+async fn select_video_visibility(
+    page: &mut PageSession,
+    visibility: multipost_core::Visibility,
+) -> anyhow::Result<()> {
+    let label = match visibility {
+        multipost_core::Visibility::Public => "公开",
+        multipost_core::Visibility::Followers => "粉丝可见",
+        multipost_core::Visibility::Private | multipost_core::Visibility::Unlisted => "仅我可见",
+    };
+    let label_json = serde_json::to_string(label)?;
+    let js = format!(
+        r#"(() => {{
+            const want = {label_json};
+            const candidates = [...document.querySelectorAll('label, span, div')].filter(el => {{
+              const text = (el.innerText || '').trim();
+              const r = el.getBoundingClientRect();
+              return text === want && r.width > 0 && r.height > 0;
+            }});
+            const el = candidates[candidates.length - 1];
+            if (!el) return {{ok:false}};
+            el.click();
+            return {{ok:true, text: (el.innerText || '').trim()}};
+        }})()"#
+    );
+    let r = page.evaluate(&js).await?;
+    if !r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("could not select Toutiao video visibility {label}: {r}");
+    }
+    Ok(())
+}
+
+async fn dismiss_video_tips(page: &mut PageSession) -> anyhow::Result<()> {
+    if let Some((x, y)) = visible_text_center(page, &["我知道了", "知道了", "关闭"]).await?
+    {
+        page.real_click(x, y).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(())
+}
+
+async fn select_video_declaration(page: &mut PageSession) -> anyhow::Result<()> {
+    if let Some((x, y)) = visible_text_center(page, &["投资观点，仅供参考"]).await? {
+        page.real_click(x, y).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Ok(());
+    }
+    anyhow::bail!("could not find Toutiao video declaration option")
+}
+
+async fn wait_for_video_publish_enabled(
+    page: &mut PageSession,
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    loop {
+        let r = page
+            .evaluate(
+                r#"(() => {
+                    const buttons = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+                    const b = buttons.find(x => (x.innerText || '').trim() === '发布');
+                    if (!b) return {found:false};
+                    return {found:true, disabled: !!b.disabled || b.getAttribute('aria-disabled') === 'true'};
+                })()"#,
+            )
+            .await?;
+        if r.get("found").and_then(|v| v.as_bool()).unwrap_or(false)
+            && !r.get("disabled").and_then(|v| v.as_bool()).unwrap_or(true)
+        {
+            return Ok(());
+        }
+        if start.elapsed() > deadline {
+            anyhow::bail!("timed out waiting for Toutiao video publish button: {r}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn click_video_publish(page: &mut PageSession) -> anyhow::Result<()> {
+    let Some((x, y)) = visible_button_center(page, "发布").await? else {
+        anyhow::bail!("Toutiao video publish button not found");
+    };
+    page.real_click(x, y).await?;
+    Ok(())
+}
+
+async fn visible_text_center(
+    page: &mut PageSession,
+    labels: &[&str],
+) -> anyhow::Result<Option<(f64, f64)>> {
+    let labels_json = serde_json::to_string(labels)?;
+    let r = page
+        .evaluate(&format!(
+            r#"(() => {{
+                const labels = new Set({labels_json});
+                const els = [...document.querySelectorAll('button, [role=button], label, span, div')]
+                  .filter(e => labels.has((e.innerText || '').trim()) && e.offsetParent !== null);
+                const el = els[els.length - 1];
+                if (!el) return null;
+                el.scrollIntoView({{block: 'center', inline: 'center'}});
+                const rect = el.getBoundingClientRect();
+                return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: (el.innerText || '').trim()}};
+            }})()"#
+        ))
+        .await?;
+    Ok(r.as_object()
+        .and_then(|_| Some((r.get("x")?.as_f64()?, r.get("y")?.as_f64()?))))
+}
+
+async fn visible_button_center(
+    page: &mut PageSession,
+    label: &str,
+) -> anyhow::Result<Option<(f64, f64)>> {
+    let label_json = serde_json::to_string(label)?;
+    let r = page
+        .evaluate(&format!(
+            r#"(() => {{
+                const label = {label_json};
+                const buttons = [...document.querySelectorAll('button')]
+                  .filter(b => (b.innerText || '').trim() === label && b.offsetParent !== null);
+                const b = buttons[buttons.length - 1];
+                if (!b || b.disabled || b.getAttribute('aria-disabled') === 'true') return null;
+                b.scrollIntoView({{block: 'center', inline: 'center'}});
+                const rect = b.getBoundingClientRect();
+                return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
+            }})()"#
+        ))
+        .await?;
+    Ok(r.as_object()
+        .and_then(|_| Some((r.get("x")?.as_f64()?, r.get("y")?.as_f64()?))))
+}
+
+async fn wait_for_video_publish_result(
+    page: &mut PageSession,
+    deadline: Duration,
+) -> anyhow::Result<String> {
+    let start = Instant::now();
+    loop {
+        let r = page
+            .evaluate(
+                r#"(() => JSON.stringify({
+                    href: location.href,
+                    text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 600)
+                }))()"#,
+            )
+            .await?;
+        let s = r.as_str().unwrap_or("{}").to_string();
+        if s.contains("发布成功")
+            || s.contains("已发布")
+            || s.contains("审核")
+            || s.contains("/manage/")
+            || s.contains("作品管理")
+        {
+            let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+            return Ok(v
+                .get("href")
+                .and_then(|v| v.as_str())
+                .unwrap_or(selectors::VIDEO_UPLOAD_URL)
+                .to_string());
+        }
+        if s.contains("发布失败") || s.contains("请完善") || s.contains("错误") {
+            anyhow::bail!("Toutiao video publish failed: {s}");
+        }
+        if start.elapsed() > deadline {
+            anyhow::bail!("timed out waiting for Toutiao video publish result: {s}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+fn split_video_title_body(text: &str) -> (String, String) {
+    let (head, rest) = match text.find('\n') {
+        Some(i) => (&text[..i], &text[i + 1..]),
+        None => (text, ""),
+    };
+    let title: String = head.trim().chars().take(30).collect();
+    let description: String = rest.trim_start().chars().take(400).collect();
+    (title, description)
+}
+
+async fn write_local_media_tempfile(
+    prefix: &str,
+    media: &MediaPayload,
+) -> anyhow::Result<std::path::PathBuf> {
+    let suffix = std::path::Path::new(&media.filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_else(|| ".mp4".to_string());
+    let path = std::env::temp_dir().join(format!("{prefix}{}{suffix}", uuid::Uuid::new_v4()));
+    tokio::fs::write(&path, &media.bytes).await?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,7 +1694,7 @@ mod tests {
 
         // Assert
         assert_eq!(p.platform(), Platform::Toutiao);
-        assert!(!c.video_supported);
+        assert!(c.video_supported);
         assert_eq!(c.max_text_chars, None);
         assert_eq!(c.max_images, Some(selectors::WEITOUTIAO_MAX_IMAGES));
     }
