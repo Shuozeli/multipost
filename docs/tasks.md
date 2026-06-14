@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-13T08:52:18Z -->
+<!-- agent-updated: 2026-06-14T15:51:09Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
@@ -34,7 +34,11 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
   not private before marking the job confirmed. Public YouTube jobs also run the
   same anonymous watch-page check after publisher confirmation, and confirm-poll
   timeout now marks the job `Failed` instead of silently leaving it in
-  `Confirming`. CLI `verify youtube --video-id` / `--url` exposes the same
+  `Confirming`. The Studio flow now scopes `Next`, visibility radio, and final
+  action clicks to visible enabled controls, waits for the active Visibility step
+  instead of matching background page text, verifies the selected radio state, and
+  waits for the detail page to show the requested final visibility before
+  returning. CLI `verify youtube --video-id` / `--url` exposes the same
   public-page check for post-publish audits.
 - [x] **Douyin video publisher** — `crates/multipost-publishers/douyin/` stages
   video files onto the Chrome host over SCP, uploads via `DOM.setFileInputFiles`,

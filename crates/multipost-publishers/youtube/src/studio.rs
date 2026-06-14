@@ -236,11 +236,13 @@ async fn drive_upload(
         }
         page.select_not_made_for_kids().await?;
         page.click_next(3).await?;
-        page.wait_for_text("Visibility", Duration::from_secs(30))
+        page.wait_for_visibility_step(Duration::from_secs(30))
             .await?;
         page.select_visibility(content.visibility).await?;
         page.wait_until_upload_ready().await?;
         page.click_final_visibility_action(content.visibility)
+            .await?;
+        page.wait_for_final_visibility_state(content.visibility)
             .await?;
         let permalink = page.wait_for_youtu_link(Duration::from_secs(90)).await?;
         let external_id = extract_video_id(&permalink)
@@ -659,8 +661,20 @@ impl PageSession {
                 .evaluate(
                     r#"
                     (() => {
-                      const buttons = [...document.querySelectorAll('ytcp-button, button')];
-                      const next = buttons.find(b => /next|下一步/i.test(b.innerText || b.getAttribute('aria-label') || ''));
+                      const visible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                          s.visibility !== 'hidden' && s.display !== 'none';
+                      };
+                      const enabled = (el) =>
+                        !el.disabled && !el.hasAttribute('disabled') &&
+                        el.getAttribute('aria-disabled') !== 'true';
+                      const buttons = [...document.querySelectorAll('ytcp-button, button')].reverse();
+                      const next = buttons.find(b => {
+                        const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
+                        return visible(b) && enabled(b) && /^(next|下一步)$/i.test(text);
+                      });
                       if (next) { next.click(); return true; }
                       return false;
                     })()
@@ -677,6 +691,48 @@ impl PageSession {
         Ok(())
     }
 
+    async fn wait_for_visibility_step(&mut self, timeout: Duration) -> AnyResult<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            let visible = self
+                .evaluate(
+                    r#"
+                    (() => {
+                      const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                          s.visibility !== 'hidden' && s.display !== 'none';
+                      };
+                      const dialogs = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-uploads-dialog')]
+                        .filter(isVisible);
+                      for (const dialog of dialogs) {
+                        const reviews = [...dialog.querySelectorAll('ytcp-uploads-review, #scrollable-content, h1')]
+                          .filter(isVisible);
+                        if (reviews.some(e => /Visibility|公开范围|可见性/i.test(e.innerText || e.textContent || ''))) {
+                          const radios = [...dialog.querySelectorAll('tp-yt-paper-radio-button[name="PUBLIC"], [role=radio][name="PUBLIC"]')]
+                            .filter(isVisible);
+                          if (radios.length > 0) return true;
+                        }
+                      }
+                      return false;
+                    })()
+                    "#,
+                )
+                .await?
+                .as_bool()
+                .unwrap_or(false);
+            if visible {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(anyhow!(
+            "timed out waiting for YouTube Studio Visibility step"
+        ))
+    }
+
     async fn select_visibility(&mut self, visibility: Visibility) -> AnyResult<()> {
         let name = match visibility {
             Visibility::Public => "PUBLIC",
@@ -687,12 +743,28 @@ impl PageSession {
             .evaluate(&format!(
                 r#"
                 (() => {{
-                  const direct = document.querySelector('tp-yt-paper-radio-button[name="{name}"]');
-                  if (direct) {{ direct.click(); return true; }}
+                  const visible = (el) => {{
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                      s.visibility !== 'hidden' && s.display !== 'none';
+                  }};
+                  const isChecked = (el) => el.checked === true ||
+                    el.getAttribute('aria-checked') === 'true' ||
+                    el.hasAttribute('checked');
+                  const direct = [...document.querySelectorAll('tp-yt-paper-radio-button[name="{name}"], [role=radio][name="{name}"]')]
+                    .find(visible);
+                  if (direct) {{
+                    direct.click();
+                    return isChecked(direct);
+                  }}
                   const wanted = "{name}".toLowerCase();
                   const radios = [...document.querySelectorAll('tp-yt-paper-radio-button, [role=radio]')];
-                  const hit = radios.find(e => (e.innerText || e.getAttribute('aria-label') || '').toLowerCase().includes(wanted));
-                  if (hit) {{ hit.click(); return true; }}
+                  const hit = radios.find(e => visible(e) && (e.innerText || e.getAttribute('aria-label') || '').toLowerCase().includes(wanted));
+                  if (hit) {{
+                    hit.click();
+                    return isChecked(hit);
+                  }}
                   return false;
                 }})()
                 "#
@@ -734,11 +806,17 @@ impl PageSession {
                 r#"
                 (() => {{
                   const wanted = "{label}";
+                  const visible = (el) => {{
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                      s.visibility !== 'hidden' && s.display !== 'none';
+                  }};
                   const buttons = [...document.querySelectorAll('ytcp-button, button')].reverse();
                   const hit = buttons.find(b => {{
-                    const text = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
+                    const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
                     const disabled = b.disabled || b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true';
-                    return !disabled && text === wanted;
+                    return visible(b) && !disabled && text === wanted;
                   }});
                   if (hit) {{ hit.click(); return true; }}
                   return false;
@@ -754,6 +832,50 @@ impl PageSession {
             ));
         }
         Ok(())
+    }
+
+    async fn wait_for_final_visibility_state(&mut self, visibility: Visibility) -> AnyResult<()> {
+        let expected = match visibility {
+            Visibility::Public => "Public",
+            Visibility::Unlisted | Visibility::Followers => "Unlisted",
+            Visibility::Private => "Private",
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        while tokio::time::Instant::now() < deadline {
+            let ok = self
+                .evaluate(&format!(
+                    r#"
+                    (() => {{
+                      const body = document.body?.innerText || '';
+                      if (body.includes('This video is in a draft state')) return false;
+                      const expected = "{expected}";
+                      const normalized = body.replace(/\r/g, '');
+                      if (new RegExp('Video quality\\n(?:.*\\n)*?Visibility\\n' + expected).test(normalized)) {{
+                        return true;
+                      }}
+                      const visible = (el) => {{
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                          s.visibility !== 'hidden' && s.display !== 'none';
+                      }};
+                      return [...document.querySelectorAll('ytcp-text-dropdown-trigger, ytcp-dropdown-trigger, [role=button], div')]
+                        .filter(visible)
+                        .some(el => (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ') === `Visibility ${{expected}}`);
+                    }})()
+                    "#
+                ))
+                .await?
+                .as_bool()
+                .unwrap_or(false);
+            if ok {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        Err(anyhow!(
+            "YouTube Studio did not show final visibility {expected}"
+        ))
     }
 
     async fn wait_for_youtu_link(&mut self, timeout: Duration) -> AnyResult<String> {
