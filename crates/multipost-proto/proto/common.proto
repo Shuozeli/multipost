@@ -10,6 +10,7 @@ enum Platform {
   PLATFORM_TWITTER = 3;
   PLATFORM_DOUYIN = 4;
   PLATFORM_TOUTIAO = 5;
+  PLATFORM_BILIBILI = 6;
 }
 
 // Auth status of a connected account.

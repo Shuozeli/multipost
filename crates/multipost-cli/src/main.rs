@@ -308,6 +308,31 @@ enum AccountsAction {
         #[arg(long, default_value = "")]
         toutiao_id: String,
     },
+    /// Register a Bilibili account. Requires cookies extracted from a
+    /// Chrome profile that's already logged into bilibili.com.
+    RegisterBilibili {
+        /// Chrome DevTools Protocol HTTP endpoint.
+        #[arg(long)]
+        cdp_url: String,
+        /// `SESSDATA` cookie value.
+        #[arg(long)]
+        sessdata: String,
+        /// `bili_jct` cookie value (CSRF token).
+        #[arg(long)]
+        bili_jct: String,
+        /// `buvid3` cookie value.
+        #[arg(long, default_value = "")]
+        buvid3: String,
+        /// `DedeUserID` cookie value.
+        #[arg(long, default_value = "")]
+        dedeuserid: String,
+        /// Optional cached display name.
+        #[arg(long, default_value = "")]
+        nickname: String,
+        /// Optional cached Bilibili user ID (mid).
+        #[arg(long, default_value = "")]
+        bilibili_uid: String,
+    },
     /// Register a Twitter / X account by the CDP endpoint of a Chrome
     /// profile that's already logged into x.com.
     RegisterTwitter {
@@ -331,6 +356,7 @@ fn parse_platform(s: &str) -> anyhow::Result<ProtoPlatform> {
         "twitter" | "x" => ProtoPlatform::Twitter,
         "douyin" => ProtoPlatform::Douyin,
         "toutiao" => ProtoPlatform::Toutiao,
+        "bilibili" | "bili" => ProtoPlatform::Bilibili,
         other => anyhow::bail!("unknown platform {other:?}"),
     })
 }
@@ -864,6 +890,40 @@ async fn handle_accounts(
             println!("  display_name: {}", resp.display_name);
             if !resp.external_id.is_empty() {
                 println!("  toutiao_id:   {}", resp.external_id);
+            }
+        }
+        AccountsAction::RegisterBilibili {
+            cdp_url,
+            sessdata,
+            bili_jct,
+            buvid3,
+            dedeuserid,
+            nickname,
+            bilibili_uid,
+        } => {
+            let creds = serde_json::json!({
+                "cdp_url": cdp_url,
+                "sessdata": sessdata,
+                "bili_jct": bili_jct,
+                "buvid3": buvid3,
+                "dedeuserid": dedeuserid,
+                "nickname": nickname,
+                "bilibili_uid": bilibili_uid,
+            })
+            .to_string();
+            let resp = client
+                .register_developer_credentials(RegisterDeveloperRequest {
+                    platform: ProtoPlatform::Bilibili as i32,
+                    credentials_json: creds,
+                })
+                .await
+                .context("Accounts.RegisterDeveloperCredentials rpc")?
+                .into_inner();
+            println!("✓ Bilibili account registered");
+            println!("  id:           {}", resp.id);
+            println!("  display_name: {}", resp.display_name);
+            if !resp.external_id.is_empty() {
+                println!("  bilibili_uid: {}", resp.external_id);
             }
         }
         AccountsAction::RegisterTwitter {

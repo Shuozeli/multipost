@@ -27,6 +27,7 @@ multipost-publishers-wx-gzh.workspace = true
 multipost-publishers-douyin.workspace = true
 multipost-publishers-toutiao.workspace = true
 multipost-publishers-twitter.workspace = true
+multipost-publishers-bilibili.workspace = true
 multipost-crawlers-toutiao.workspace = true
 multipost-crawlers-twitter.workspace = true
 tonic.workspace = true

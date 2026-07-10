@@ -16,6 +16,8 @@ pub enum Platform {
     Douyin,
     /// Toutiao (头条号) — browser automation against mp.toutiao.com.
     Toutiao,
+    /// Bilibili (哔哩哔哩) — cookie auth via CDP, REST API upload.
+    Bilibili,
 }
 
 impl Platform {
@@ -27,6 +29,7 @@ impl Platform {
             Platform::Twitter => "twitter",
             Platform::Douyin => "douyin",
             Platform::Toutiao => "toutiao",
+            Platform::Bilibili => "bilibili",
         }
     }
 
@@ -35,7 +38,7 @@ impl Platform {
     pub fn is_api(&self) -> bool {
         match self {
             Platform::YouTube | Platform::WxGzh => true,
-            Platform::Twitter | Platform::Douyin | Platform::Toutiao => false,
+            Platform::Twitter | Platform::Douyin | Platform::Toutiao | Platform::Bilibili => false,
         }
     }
 }

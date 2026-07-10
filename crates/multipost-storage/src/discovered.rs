@@ -266,6 +266,7 @@ fn platform_to_str(p: Platform) -> &'static str {
         Platform::Twitter => "twitter",
         Platform::Douyin => "douyin",
         Platform::Toutiao => "toutiao",
+        Platform::Bilibili => "bilibili",
     }
 }
 

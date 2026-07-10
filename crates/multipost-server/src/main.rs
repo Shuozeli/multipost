@@ -22,6 +22,7 @@ use multipost_proto::crawl::crawl_server::CrawlServer;
 use multipost_proto::media::media_server::MediaServer;
 use multipost_proto::posts::posts_server::PostsServer;
 use multipost_proto::stats::stats_server::StatsServer;
+use multipost_publishers_bilibili::BilibiliPublisher;
 use multipost_publishers_douyin::DouyinPublisher;
 use multipost_publishers_toutiao::{ToutiaoPublisher, ToutiaoStatsCollector};
 use multipost_publishers_twitter::{TwitterPublisher, TwitterStatsCollector};
@@ -163,6 +164,10 @@ async fn main() -> anyhow::Result<()> {
     // Twitter / X: per-account CDP + handle.
     publishers.insert(Platform::Twitter, Arc::new(TwitterPublisher::new()));
     info!("Twitter publisher registered");
+
+    // Bilibili: cookie auth via CDP, REST API upload.
+    publishers.insert(Platform::Bilibili, Arc::new(BilibiliPublisher::new()));
+    info!("Bilibili publisher registered");
 
     // Crawlers (read-only; drive pwright via subprocess).
     let mut crawlers: HashMap<Platform, Arc<dyn multipost_core::Crawler>> = HashMap::new();

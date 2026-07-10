@@ -12,6 +12,7 @@ members = [
     "crates/multipost-publishers/douyin",
     "crates/multipost-publishers/toutiao",
     "crates/multipost-publishers/twitter",
+    "crates/multipost-publishers/bilibili",
     "crates/multipost-crawlers/toutiao",
     "crates/multipost-crawlers/twitter",
 ]
@@ -69,6 +70,7 @@ tempfile = "3"
 rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
+urlencoding = "2"
 pulldown-cmark = "0.11"
 
 # CDP / WebSocket — minimal CDP client for browser-automation publishers.
@@ -85,6 +87,7 @@ multipost-publishers-wx-gzh = { path = "crates/multipost-publishers/wx-gzh" }
 multipost-publishers-douyin = { path = "crates/multipost-publishers/douyin" }
 multipost-publishers-toutiao = { path = "crates/multipost-publishers/toutiao" }
 multipost-publishers-twitter = { path = "crates/multipost-publishers/twitter" }
+multipost-publishers-bilibili = { path = "crates/multipost-publishers/bilibili" }
 multipost-crawlers-toutiao = { path = "crates/multipost-crawlers/toutiao" }
 multipost-crawlers-twitter = { path = "crates/multipost-crawlers/twitter" }
 

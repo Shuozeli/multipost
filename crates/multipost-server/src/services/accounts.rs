@@ -14,6 +14,7 @@ use multipost_proto::accounts::{
     StartAuthRequest, StartAuthResponse, complete_auth_request, start_auth_response,
 };
 use multipost_proto::common::Platform as ProtoPlatform;
+use multipost_publishers_bilibili::BilibiliCredentials;
 use multipost_publishers_douyin::DouyinCredentials;
 use multipost_publishers_toutiao::ToutiaoCredentials;
 use multipost_publishers_twitter::TwitterCredentials;
@@ -54,6 +55,7 @@ fn proto_to_core(p: ProtoPlatform) -> Result<Platform, Status> {
         ProtoPlatform::Twitter => Ok(Platform::Twitter),
         ProtoPlatform::Douyin => Ok(Platform::Douyin),
         ProtoPlatform::Toutiao => Ok(Platform::Toutiao),
+        ProtoPlatform::Bilibili => Ok(Platform::Bilibili),
         ProtoPlatform::Unspecified => Err(Status::invalid_argument("platform unspecified")),
     }
 }
@@ -65,6 +67,7 @@ fn core_to_proto(p: Platform) -> i32 {
         Platform::Twitter => ProtoPlatform::Twitter,
         Platform::Douyin => ProtoPlatform::Douyin,
         Platform::Toutiao => ProtoPlatform::Toutiao,
+        Platform::Bilibili => ProtoPlatform::Bilibili,
     };
     v as i32
 }
@@ -145,12 +148,14 @@ impl Accounts for AccountsService {
                     method: Some(start_auth_response::Method::AuthUrl(url.to_string())),
                 }))
             }
-            Platform::WxGzh | Platform::Twitter | Platform::Douyin | Platform::Toutiao => {
-                Err(Status::unimplemented(format!(
-                    "{} StartAuth lands in a later phase",
-                    platform.as_str()
-                )))
-            }
+            Platform::WxGzh
+            | Platform::Twitter
+            | Platform::Douyin
+            | Platform::Toutiao
+            | Platform::Bilibili => Err(Status::unimplemented(format!(
+                "{} StartAuth lands in a later phase",
+                platform.as_str()
+            ))),
         }
     }
 
@@ -581,6 +586,71 @@ impl Accounts for AccountsService {
                     .await
                     .map_err(|e| Status::internal(format!("persist account: {e}")))?;
                 tracing::info!(handle = %creds.handle, "twitter account registered");
+                Ok(Response::new(record_to_proto(&record)))
+            }
+            Platform::Bilibili => {
+                // Bilibili — cookie auth via CDP + REST API upload.
+                let creds: BilibiliCredentials = serde_json::from_str(&r.credentials_json)
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "credentials_json must be \
+                             {{cdp_url, sessdata, bili_jct, buvid3, dedeuserid, \
+                             nickname?, bilibili_uid?}}: {e}"
+                        ))
+                    })?;
+                if !creds.has_cookies() {
+                    return Err(Status::invalid_argument(
+                        "sessdata and bili_jct are required \
+                         (extract from a Chrome logged into bilibili.com)",
+                    ));
+                }
+                let publisher = self
+                    .state
+                    .publishers
+                    .get(&Platform::Bilibili)
+                    .cloned()
+                    .ok_or_else(|| Status::internal("bilibili publisher not registered"))?;
+                let probe_creds = serde_json::to_value(&creds)
+                    .map_err(|e| Status::internal(format!("serialize bilibili creds: {e}")))?;
+                let probe_ctx = multipost_core::PublishContext {
+                    account_id: Uuid::nil(),
+                    user_id: tenant_id,
+                    credentials: &probe_creds,
+                    media: vec![],
+                };
+                let auth = publisher.check_auth(&probe_ctx).await.map_err(|e| {
+                    Status::failed_precondition(format!("bilibili check_auth: {e}"))
+                })?;
+                if !matches!(auth, AuthStatus::Active) {
+                    return Err(Status::failed_precondition(format!(
+                        "bilibili session is not active (status={auth:?}). \
+                         Re-extract cookies from the Chrome at {}.",
+                        creds.cdp_url,
+                    )));
+                }
+
+                let now = Utc::now();
+                let record = AccountRecord {
+                    id: Uuid::new_v4(),
+                    user_id: tenant_id,
+                    platform: Platform::Bilibili,
+                    display_name: if creds.nickname.is_empty() {
+                        "(bilibili)".to_string()
+                    } else {
+                        creds.nickname.clone()
+                    },
+                    external_id: creds.bilibili_uid.clone(),
+                    auth_status: AuthStatus::Active,
+                    credentials: probe_creds,
+                    created_at: now,
+                    last_used_at: now,
+                };
+                self.state
+                    .accounts
+                    .upsert(record.clone())
+                    .await
+                    .map_err(|e| Status::internal(format!("persist account: {e}")))?;
+                tracing::info!(uid = %creds.bilibili_uid, "bilibili account registered");
                 Ok(Response::new(record_to_proto(&record)))
             }
             Platform::YouTube => Err(Status::failed_precondition(
