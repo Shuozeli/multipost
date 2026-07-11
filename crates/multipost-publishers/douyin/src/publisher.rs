@@ -489,6 +489,21 @@ async fn run_upload_flow(
 
     let _ = dismiss_tooltips(page).await;
 
+    // ---- Wait for video upload to complete on Douyin's servers ----
+    // After setFileInputFiles, the page transitions to the post editor and
+    // Douyin starts uploading the video to its CDN. The upload progress is
+    // shown in the UI. We MUST wait for this to complete before filling the
+    // form or clicking publish, otherwise Douyin silently discards the
+    // incomplete upload.
+    //
+    // Indicators:
+    //   - Upload in progress: page contains "上传中" or a percentage like "42%"
+    //   - Upload complete: page contains "重新上传" or "替换视频"
+    //   - Upload failed: page contains "上传失败"
+    wait_for_video_upload_complete(page, Duration::from_secs(300))
+        .await
+        .map_err(|e| PublishError::Transient(format!("douyin video upload: {e}")))?;
+
     // Form hydrates async after the URL flips — wait for both the title
     // input and the description editor to be in the DOM before filling.
     // Bumped to 60s — on busy Chromes Douyin sometimes delays mounting
@@ -601,6 +616,64 @@ async fn select_visibility(page: &mut PageSession, vis: Visibility) -> Result<Vi
     let matched = r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     tracing::info!(visibility = ?vis, matched, "douyin: visibility selection");
     Ok(VisibilitySelection { matched })
+}
+
+/// Poll until the video finishes uploading to Douyin's CDN.
+///
+/// Douyin's upload page shows progress indicators while the video is being
+/// processed server-side. We poll the page text for completion markers:
+///   - "重新上传" or "替换视频" → upload complete
+///   - "上传失败" → upload failed
+///   - "上传中" or a bare percentage → still uploading
+///
+/// This function blocks until the upload completes or the deadline expires.
+/// Without this wait, clicking 发布 on an incomplete upload causes Douyin
+/// to silently discard the video (it appears to publish but never shows up
+/// in the manage page).
+async fn wait_for_video_upload_complete(
+    page: &mut PageSession,
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let js = r#"(() => {
+        const text = document.body.innerText || '';
+        if (text.includes('重新上传') || text.includes('替换视频')) return 'complete';
+        if (text.includes('上传失败')) return 'failed';
+        if (text.includes('上传中')) return 'uploading';
+        // Check for percentage pattern (e.g. "42%") which indicates upload progress
+        if (/\d+%/.test(text)) return 'uploading';
+        return 'waiting';
+    })()"#;
+
+    let mut last_state = String::new();
+    loop {
+        let result = page.evaluate(js).await?;
+        let state = result.as_str().unwrap_or("unknown").to_string();
+
+        if state != last_state {
+            tracing::info!(state = %state, elapsed = ?start.elapsed(), "douyin: video upload state");
+            last_state = state.clone();
+        }
+
+        match state.as_str() {
+            "complete" => {
+                tracing::info!(elapsed = ?start.elapsed(), "douyin: video upload complete");
+                return Ok(());
+            }
+            "failed" => {
+                anyhow::bail!("Douyin video upload failed (上传失败)");
+            }
+            _ => {
+                if start.elapsed() > deadline {
+                    anyhow::bail!(
+                        "timed out waiting for video upload to complete (last state: {state}, elapsed: {:?})",
+                        start.elapsed()
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        }
+    }
 }
 
 /// Poll for the 发布 button to become enabled.

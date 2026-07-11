@@ -406,4 +406,25 @@ impl PageSession {
         self.send("Page.bringToFront", json!({})).await?;
         Ok(())
     }
+
+    /// Force the renderer to always report `document.visibilityState === "visible"`
+    /// and `document.hasFocus() === true`, regardless of whether this tab is the
+    /// OS-foreground window (`Emulation.setFocusEmulationEnabled`).
+    ///
+    /// `Page.bringToFront` only activates the tab WITHIN its window — if the
+    /// Chrome window itself is occluded / not the OS-foreground window (common on
+    /// the shared alienware browser when other jobs/tabs run), the page stays
+    /// `visibilityState:hidden`. The byte-design 微头条 image-insert 确定 button
+    /// refuses to commit while hidden, so a `real_click` lands but the drawer
+    /// never closes ("确定 did not commit") — racy, foreground-dependent. Pinning
+    /// focus emulation makes the page believe it is visible+focused for the whole
+    /// publish flow, so the trusted click commits deterministically.
+    pub async fn set_focus_emulation(&mut self, enabled: bool) -> Result<()> {
+        self.send(
+            "Emulation.setFocusEmulationEnabled",
+            json!({ "enabled": enabled }),
+        )
+        .await?;
+        Ok(())
+    }
 }

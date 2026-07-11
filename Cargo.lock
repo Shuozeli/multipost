@@ -1276,8 +1276,10 @@ dependencies = [
  "chrono",
  "clap",
  "multipost-proto",
+ "multipost-publishers-youtube",
  "multipost-storage",
  "prost",
+ "reqwest",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1330,6 +1332,22 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "multipost-crawlers-youtube"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "multipost-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1464,12 +1482,15 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures-util",
  "multipost-core",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "url",
  "uuid",
@@ -1487,6 +1508,7 @@ dependencies = [
  "multipost-core",
  "multipost-crawlers-toutiao",
  "multipost-crawlers-twitter",
+ "multipost-crawlers-youtube",
  "multipost-orchestrator",
  "multipost-proto",
  "multipost-publishers-bilibili",

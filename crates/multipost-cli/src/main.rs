@@ -1,6 +1,7 @@
 //! multipost CLI.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -109,13 +110,21 @@ enum Command {
     /// content + engagement metrics. Submits + long-polls. Results are
     /// also persisted to `~/.multipost/discovered.sqlite` on the server.
     Crawl {
-        /// Platform to crawl: toutiao | twitter.
+        /// Platform to crawl: toutiao | twitter | youtube.
         #[arg(long)]
         platform: String,
         /// How long the crawler should listen + scroll, in seconds.
         /// Server clamps to [5, 300].
         #[arg(long, default_value = "30")]
         duration: u32,
+        /// Source URL/page to crawl. Repeatable. Required for YouTube
+        /// unless the server has MULTIPOST_YOUTUBE_CRAWL_URLS set.
+        #[arg(long = "url")]
+        urls: Vec<String>,
+        /// Return captured items in the job response without writing
+        /// them to the server's discovered.sqlite.
+        #[arg(long)]
+        skip_persist: bool,
     },
     /// Crawl the recent posts of one or more specific accounts (vs. the
     /// anonymous feed). Submits + long-polls one job per handle. Results
@@ -137,7 +146,7 @@ enum Command {
     /// List recently captured items for a platform from the server's
     /// SQLite store (across all crawl jobs).
     Discovered {
-        /// Platform: toutiao | twitter.
+        /// Platform: toutiao | twitter | youtube.
         #[arg(long)]
         platform: String,
         /// Max items.
@@ -154,11 +163,19 @@ enum Command {
     /// Submit content for publishing.
     Post {
         /// One platform name per --to: youtube, wx-gzh, twitter, douyin.
-        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
         to: Vec<String>,
+        /// Explicit account ID to publish to. Repeatable. Use this when
+        /// multiple accounts exist on the same platform.
+        #[arg(long = "account-id")]
+        account_ids: Vec<String>,
         /// Path to a video file (required for video platforms).
         #[arg(long)]
         video: Option<PathBuf>,
+        /// Path to a custom thumbnail / cover image for video platforms.
+        /// Uploaded after --video and currently consumed by YouTube.
+        #[arg(long)]
+        thumbnail: Option<PathBuf>,
         /// Path to an image to attach. Repeatable:
         /// `--image a.png --image b.jpg`. Routes to the platform's
         /// image-post flow (Twitter tweet with photos, Toutiao 微头条
@@ -180,6 +197,27 @@ enum Command {
         /// Visibility: public, unlisted, private.
         #[arg(long, default_value = "private")]
         privacy: String,
+        /// Shortcut for `--privacy public`.
+        #[arg(long)]
+        public: bool,
+    },
+    /// Verify whether a published platform URL is publicly available.
+    Verify {
+        #[command(subcommand)]
+        action: VerifyAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VerifyAction {
+    /// Verify a YouTube watch URL or video id without using the multipost server.
+    Youtube {
+        /// YouTube video id, e.g. NfbjHERIyRE.
+        #[arg(long)]
+        video_id: Option<String>,
+        /// YouTube watch / youtu.be URL.
+        #[arg(long)]
+        url: Option<String>,
     },
 }
 
@@ -301,6 +339,22 @@ enum AccountsAction {
         /// Chrome DevTools Protocol HTTP endpoint.
         #[arg(long)]
         cdp_url: String,
+        /// SSH host where Chrome runs. Required for remote video upload
+        /// staging; optional for article/微头条.
+        #[arg(long, default_value = "")]
+        ssh_host: String,
+        /// SSH username on `--ssh-host`.
+        #[arg(long, default_value = "")]
+        ssh_user: String,
+        /// Optional SSH password. If set, staging uses `sshpass`.
+        #[arg(long, default_value = "")]
+        ssh_password: String,
+        /// SSH port on `--ssh-host`. Omit for 22.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+        /// Directory on the Chrome host for staged video uploads.
+        #[arg(long, default_value = "C:/Users/cyuan/Videos/multipost-uploads")]
+        remote_temp_dir: String,
         /// Optional cached display name.
         #[arg(long, default_value = "")]
         nickname: String,
@@ -346,6 +400,35 @@ enum AccountsAction {
         /// Optional cached display name.
         #[arg(long, default_value = "")]
         display_name: String,
+    },
+    /// Register a YouTube Studio account by the CDP endpoint of a Chrome
+    /// profile that's already logged into studio.youtube.com.
+    RegisterYoutubeStudio {
+        /// Chrome DevTools Protocol HTTP endpoint.
+        #[arg(long)]
+        cdp_url: String,
+        /// SSH host where Chrome runs. Required when Chrome is remote so
+        /// video files can be staged before DOM.setFileInputFiles.
+        #[arg(long, default_value = "")]
+        ssh_host: String,
+        /// SSH username on `--ssh-host`.
+        #[arg(long, default_value = "")]
+        ssh_user: String,
+        /// Optional SSH password. If set, staging uses `sshpass`.
+        #[arg(long, default_value = "")]
+        ssh_password: String,
+        /// SSH port on `--ssh-host`. Omit for 22.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+        /// Directory on the Chrome host for staged uploads.
+        #[arg(long, default_value = "C:/Users/cyuan/Videos/multipost-uploads")]
+        remote_temp_dir: String,
+        /// Optional cached channel display name.
+        #[arg(long, default_value = "")]
+        display_name: String,
+        /// Optional cached channel handle, e.g. `@newfinnews`.
+        #[arg(long, default_value = "")]
+        handle: String,
     },
 }
 
@@ -396,9 +479,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Cancel { job_id } => handle_cancel(&cli.server, auth, job_id).await,
         Command::Watch { job_id } => handle_watch(&cli.server, auth, job_id).await,
         Command::GetJob { job_id, wait } => handle_get_job(&cli.server, auth, job_id, wait).await,
-        Command::Crawl { platform, duration } => {
-            handle_crawl(&cli.server, auth, platform, duration).await
-        }
+        Command::Crawl {
+            platform,
+            duration,
+            urls,
+            skip_persist,
+        } => handle_crawl(&cli.server, auth, platform, duration, urls, skip_persist).await,
         Command::CrawlUser {
             platform,
             handles,
@@ -408,31 +494,122 @@ async fn main() -> anyhow::Result<()> {
             handle_discovered(&cli.server, auth, platform, limit).await
         }
         Command::Stats { action } => handle_stats(&cli.server, auth, action).await,
+        Command::Verify { action } => handle_verify(action).await,
         Command::Post {
             to,
+            account_ids,
             video,
+            thumbnail,
             image,
             title,
             description,
             tags,
             privacy,
+            public,
         } => {
             handle_post(
                 &cli.server,
                 auth,
                 PostArgs {
                     to,
+                    account_ids,
                     video,
+                    thumbnail,
                     images: image,
                     title,
                     description,
                     tags,
                     privacy,
+                    public,
                 },
             )
             .await
         }
     }
+}
+
+async fn handle_verify(action: VerifyAction) -> anyhow::Result<()> {
+    match action {
+        VerifyAction::Youtube { video_id, url } => {
+            let id = match (video_id, url) {
+                (Some(id), None) => id,
+                (None, Some(url)) => extract_youtube_video_id(&url)?,
+                (Some(_), Some(_)) => anyhow::bail!("pass only one of --video-id or --url"),
+                (None, None) => anyhow::bail!("pass --video-id or --url"),
+            };
+            let http = reqwest::Client::new();
+            let result = multipost_publishers_youtube::verify_public_video(&http, &id)
+                .await
+                .map_err(|e| anyhow::anyhow!("youtube verify failed: {e}"))?;
+            println!("video_id:    {}", result.video_id);
+            println!("url:         {}", result.url);
+            println!("public:      {}", result.is_publicly_available());
+            println!("playable:    {}", result.playable);
+            println!("is_private:  {}", fmt_opt_bool(result.is_private));
+            if let Some(status) = &result.playability_status {
+                println!("status:      {status}");
+            }
+            if let Some(title) = &result.title {
+                println!("title:       {title}");
+            }
+            if let Some(owner) = &result.owner_channel_name {
+                println!("channel:     {owner}");
+            }
+            if let Some(reason) = &result.reason {
+                println!("reason:      {reason}");
+            }
+            if !result.is_publicly_available() {
+                anyhow::bail!("YouTube video is not publicly playable");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn fmt_opt_bool(v: Option<bool>) -> &'static str {
+    match v {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
+fn extract_youtube_video_id(url: &str) -> anyhow::Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty YouTube URL");
+    }
+    if let Some((_, rest)) = trimmed.split_once("youtu.be/") {
+        let id = take_youtube_id(rest);
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    if let Some((_, query)) = trimmed.split_once('?') {
+        for part in query.split('&') {
+            if let Some((key, value)) = part.split_once('=')
+                && key == "v"
+            {
+                let id = take_youtube_id(value);
+                if !id.is_empty() {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Ok(trimmed.to_string());
+    }
+    anyhow::bail!("could not extract YouTube video id from {url:?}");
+}
+
+fn take_youtube_id(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
 }
 
 /// Outgoing auth interceptor — injects `Authorization: Bearer <api_key>`
@@ -539,12 +716,21 @@ async fn handle_crawl(
     auth: AuthInterceptor,
     platform: String,
     duration: u32,
+    urls: Vec<String>,
+    skip_persist: bool,
 ) -> anyhow::Result<()> {
     let mut client = build_crawl(server, auth).await?;
+    let source_url_count = urls.len().max(1) as u32;
+    let wait_budget_secs = duration
+        .saturating_mul(source_url_count)
+        .saturating_add(30)
+        .max(30);
     let submitted = client
         .submit(SubmitCrawlRequest {
             platform: platform.clone(),
             duration_secs: duration,
+            source_urls: urls,
+            skip_persist,
         })
         .await?
         .into_inner();
@@ -552,16 +738,35 @@ async fn handle_crawl(
         "submitted crawl job {} ({}, {}s)",
         submitted.id, submitted.platform, submitted.duration_secs
     );
-    println!("waiting up to {}s for completion ...", duration + 30);
+    println!("waiting up to {}s for completion ...", wait_budget_secs);
 
-    // Long-poll until terminal.
-    let final_job = client
-        .get_job(GetCrawlJobRequest {
-            id: submitted.id.clone(),
-            wait_seconds: duration + 30,
-        })
-        .await?
-        .into_inner();
+    let deadline = Instant::now() + Duration::from_secs(wait_budget_secs as u64);
+    let final_job = loop {
+        let now = Instant::now();
+        let wait_seconds = if now >= deadline {
+            0
+        } else {
+            let remaining = deadline.saturating_duration_since(now).as_secs();
+            remaining.clamp(1, 60) as u32
+        };
+        let job = client
+            .get_job(GetCrawlJobRequest {
+                id: submitted.id.clone(),
+                wait_seconds,
+            })
+            .await?
+            .into_inner();
+        let state = ProtoCrawlJobState::try_from(job.state)
+            .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
+        if matches!(
+            state,
+            ProtoCrawlJobState::CrawlStateCompleted | ProtoCrawlJobState::CrawlStateFailed
+        ) || Instant::now() >= deadline
+        {
+            break job;
+        }
+        println!("state: {:?}   items: {}", state, job.items_captured);
+    };
 
     let state = ProtoCrawlJobState::try_from(final_job.state)
         .unwrap_or(ProtoCrawlJobState::CrawlStateUnspecified);
@@ -656,10 +861,13 @@ fn print_items(items: &[multipost_proto::crawl::DiscoveredItem]) {
             .collect::<String>()
             .replace('\n', " ");
         let handle: String = it.author_handle.chars().take(16).collect();
+        let item_id: String = it.item_id.chars().take(20).collect();
         println!(
-            "  [{:>3}] {:<16} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
+            "  [{:>3}] {:<20} {:<16} len={:<5} read={:>6} like={:>5} cmt={:>4} sh={:>4} bm={:>4} v={:>7} | {}",
             i + 1,
+            item_id,
             handle,
+            it.body.chars().count(),
             m.read_count,
             m.like_count,
             m.comment_count,
@@ -868,11 +1076,21 @@ async fn handle_accounts(
         }
         AccountsAction::RegisterToutiao {
             cdp_url,
+            ssh_host,
+            ssh_user,
+            ssh_password,
+            ssh_port,
+            remote_temp_dir,
             nickname,
             toutiao_id,
         } => {
             let creds = serde_json::json!({
                 "cdp_url": cdp_url,
+                "ssh_host": ssh_host,
+                "ssh_user": ssh_user,
+                "ssh_password": ssh_password,
+                "ssh_port": ssh_port,
+                "remote_temp_dir": remote_temp_dir,
                 "nickname": nickname,
                 "toutiao_id": toutiao_id,
             })
@@ -952,6 +1170,43 @@ async fn handle_accounts(
                 println!("  handle:       @{}", resp.external_id);
             }
         }
+        AccountsAction::RegisterYoutubeStudio {
+            cdp_url,
+            ssh_host,
+            ssh_user,
+            ssh_password,
+            ssh_port,
+            remote_temp_dir,
+            display_name,
+            handle,
+        } => {
+            let creds = serde_json::json!({
+                "kind": "studio_cdp",
+                "cdp_url": cdp_url,
+                "ssh_host": ssh_host,
+                "ssh_user": ssh_user,
+                "ssh_password": ssh_password,
+                "ssh_port": ssh_port,
+                "remote_temp_dir": remote_temp_dir,
+                "display_name": display_name,
+                "handle": handle,
+            })
+            .to_string();
+            let resp = client
+                .register_developer_credentials(RegisterDeveloperRequest {
+                    platform: ProtoPlatform::Youtube as i32,
+                    credentials_json: creds,
+                })
+                .await
+                .context("Accounts.RegisterDeveloperCredentials rpc")?
+                .into_inner();
+            println!("✓ YouTube Studio account registered");
+            println!("  id:           {}", resp.id);
+            println!("  display_name: {}", resp.display_name);
+            if !resp.external_id.is_empty() {
+                println!("  external_id:  {}", resp.external_id);
+            }
+        }
     }
     Ok(())
 }
@@ -1013,35 +1268,45 @@ async fn upload_media(
 /// clippy's argument-count limit.
 struct PostArgs {
     to: Vec<String>,
+    account_ids: Vec<String>,
     video: Option<PathBuf>,
+    thumbnail: Option<PathBuf>,
     images: Vec<PathBuf>,
     title: String,
     description: String,
     tags: Vec<String>,
     privacy: String,
+    public: bool,
 }
 
 async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> anyhow::Result<()> {
     let PostArgs {
         to,
+        account_ids: explicit_account_ids,
         video,
+        thumbnail,
         images,
         title,
         description,
         tags,
         privacy,
+        public,
     } = args;
-    if to.is_empty() {
-        anyhow::bail!("--to is required");
+    if to.is_empty() && explicit_account_ids.is_empty() {
+        anyhow::bail!("at least one of --to or --account-id is required");
     }
     if video.is_some() && !images.is_empty() {
         anyhow::bail!("--video and --image are mutually exclusive");
+    }
+    if thumbnail.is_some() && video.is_none() {
+        anyhow::bail!("--thumbnail requires --video");
     }
     let target_platforms: Vec<ProtoPlatform> = to
         .iter()
         .map(|s| parse_platform(s))
         .collect::<anyhow::Result<_>>()?;
-    let vis = parse_visibility(&privacy)?;
+    let effective_privacy = if public { "public" } else { privacy.as_str() };
+    let vis = parse_visibility(effective_privacy)?;
 
     // Look up accounts to find IDs matching the requested platforms.
     let mut accounts_client = build_accounts(server, auth.clone()).await?;
@@ -1052,7 +1317,7 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
         .into_inner()
         .accounts;
 
-    let mut account_ids: Vec<String> = Vec::new();
+    let mut account_ids: Vec<String> = explicit_account_ids;
     for p in &target_platforms {
         let matching: Vec<&_> = accounts
             .iter()
@@ -1075,11 +1340,14 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
         account_ids.push(matching[0].id.clone());
     }
 
-    // Upload media. --video and --image are mutually exclusive (guarded
-    // above); images upload in order so the platform attaches them in the
-    // same order the user listed them.
+    // Upload media. For video posts, the video stays first and an optional
+    // thumbnail follows it so publishers can preserve the existing media order
+    // contract without a proto change. Image posts upload in listed order.
     let mut media_ids: Vec<String> = Vec::new();
     if let Some(path) = &video {
+        media_ids.push(upload_media(server, auth.clone(), path).await?);
+    }
+    if let Some(path) = &thumbnail {
         media_ids.push(upload_media(server, auth.clone(), path).await?);
     }
     for path in &images {
@@ -1388,4 +1656,29 @@ async fn handle_cancel(server: &str, auth: AuthInterceptor, job_id: String) -> a
         println!("  ext_id: {}", resp.external_id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_youtube_id_from_watch_url() {
+        let got = extract_youtube_video_id("https://www.youtube.com/watch?v=NfbjHERIyRE&t=1")
+            .expect("watch url should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
+
+    #[test]
+    fn extracts_youtube_id_from_short_url() {
+        let got = extract_youtube_video_id("https://youtu.be/NfbjHERIyRE?si=abc")
+            .expect("short url should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
+
+    #[test]
+    fn accepts_bare_youtube_id() {
+        let got = extract_youtube_video_id("NfbjHERIyRE").expect("bare id should parse");
+        assert_eq!(got, "NfbjHERIyRE");
+    }
 }

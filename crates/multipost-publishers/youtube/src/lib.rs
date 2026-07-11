@@ -11,9 +11,11 @@
 
 pub mod auth;
 pub mod publisher;
+pub mod studio;
 
 pub use auth::{OAuthCredentials, OAuthTokens, exchange_code, refresh_token, start_oauth_url};
-pub use publisher::YouTubePublisher;
+pub use publisher::{PublicVideoVerification, YouTubePublisher, verify_public_video};
+pub use studio::StudioCredentials;
 
 /// Default OAuth scopes we request. Equivalent to `scripts/youtube/05_oauth_login.py`.
 pub const SCOPES: &[&str] = &[

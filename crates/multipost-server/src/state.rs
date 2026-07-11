@@ -15,9 +15,27 @@ use multipost_storage::discovered::DiscoveredRepository;
 use multipost_storage::jobs::JobRepository;
 use multipost_storage::media::FileBackedMediaRepository;
 use multipost_storage::stats::StatsRepository;
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+/// Snapshot of the optional background crawl scheduler.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CrawlSchedulerStatus {
+    pub enabled: bool,
+    pub configured_platforms: Vec<Platform>,
+    pub running_platform: Option<Platform>,
+    pub last_runs: HashMap<Platform, CrawlPlatformRunStatus>,
+}
+
+/// Last known scheduled-crawl result for one platform.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CrawlPlatformRunStatus {
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub items_captured: Option<usize>,
+    pub last_error: Option<String>,
+}
 
 /// Per-platform OAuth client config, loaded from env at startup.
 #[derive(Debug, Clone, Default)]
@@ -103,6 +121,12 @@ pub struct AppState {
     pub crawl_jobs: Mutex<HashMap<Uuid, CrawlJobInternal>>,
     /// Broadcast bus for crawl-job state transitions (mirrors `events`).
     pub crawl_events: broadcast::Sender<CrawlJobInternal>,
+    /// Global crawler permit. The pwright CLI stores active-tab state in
+    /// the caller's working directory, so crawler invocations must be
+    /// serialized until pwright supports per-job state isolation.
+    pub crawl_permits: Arc<Semaphore>,
+    /// Latest background scheduler status for `/healthz`.
+    pub crawl_scheduler_status: Mutex<CrawlSchedulerStatus>,
     /// Profile-stats collectors keyed by platform.
     pub stats_collectors: HashMap<Platform, Arc<dyn StatsCollector>>,
     /// SQLite-backed store for timestamped stats snapshots.
@@ -141,6 +165,8 @@ impl AppState {
             discovered,
             crawl_jobs: Mutex::new(HashMap::new()),
             crawl_events: broadcast::channel(JOB_EVENT_BUS_CAPACITY).0,
+            crawl_permits: Arc::new(Semaphore::new(1)),
+            crawl_scheduler_status: Mutex::new(CrawlSchedulerStatus::default()),
             stats_collectors,
             stats,
         }

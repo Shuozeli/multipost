@@ -11,8 +11,8 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use multipost_core::{
-    AuthStatus, ConfirmStatus, Content, ContentKind, MediaPayload, PublishContext, PublishError,
-    PublishHandle, Visibility,
+    AuthStatus, ConfirmStatus, Content, ContentKind, MediaPayload, Platform, PublishContext,
+    PublishError, PublishHandle, Visibility,
 };
 use multipost_orchestrator::JobState;
 use multipost_proto::common::JobState as ProtoJobState;
@@ -28,7 +28,7 @@ use multipost_storage::media::MediaRepository;
 use crate::auth::tenant_id_from_request;
 use crate::state::{AppState, JobEventInternal};
 
-const MAX_CONFIRM_POLLS: u32 = 12;
+const MAX_CONFIRM_POLLS: u32 = 60;
 const CONFIRM_DELAY_SECS: u64 = 5;
 /// Server-side ceiling on `GetJobRequest.wait_seconds`. Callers asking
 /// for more get clamped — a single RPC shouldn't tie up a connection
@@ -636,6 +636,7 @@ impl PostsService {
             credentials,
             handle,
             account_id,
+            requested_visibility: content.visibility,
         })
     }
 
@@ -761,6 +762,8 @@ pub(crate) struct ConfirmHandoff {
     /// (the platform may have rotated credentials again between submit
     /// and the first confirm() call).
     pub account_id: Uuid,
+    /// Visibility requested by the user for this post.
+    pub requested_visibility: Visibility,
 }
 
 /// Run `Publisher::confirm` in a loop until Confirmed | Failed (or the
@@ -777,6 +780,7 @@ pub(crate) async fn poll_confirm_until_terminal(
         credentials,
         handle,
         account_id,
+        requested_visibility,
     } = handoff;
     let account = match state.accounts.get(tenant_id, account_id).await {
         Ok(Some(a)) => a,
@@ -806,6 +810,17 @@ pub(crate) async fn poll_confirm_until_terminal(
     for attempt in 1..=MAX_CONFIRM_POLLS {
         match publisher.confirm(&ctx, &handle).await {
             Ok(ConfirmStatus::Confirmed { permalink }) => {
+                if let Err(e) = enforce_public_confirmation(
+                    &state.http,
+                    account.platform,
+                    requested_visibility,
+                    &handle,
+                )
+                .await
+                {
+                    fail_confirm_job(&state, tenant_id, job_id, format!("confirm: {e}")).await;
+                    return;
+                }
                 if let Ok(Some(mut job)) = state.jobs.get(tenant_id, job_id).await {
                     if let Some(p) = permalink {
                         job.permalink = Some(p);
@@ -829,27 +844,61 @@ pub(crate) async fn poll_confirm_until_terminal(
                 tokio::time::sleep(std::time::Duration::from_secs(CONFIRM_DELAY_SECS)).await;
             }
             Err(e) => {
-                if let Ok(Some(mut job)) = state.jobs.get(tenant_id, job_id).await {
-                    job.state = JobState::Failed;
-                    job.last_error = Some(format!("confirm: {e}"));
-                    job.attempts += 1;
-                    job.updated_at = Utc::now();
-                    let _ = state.jobs.update(job.clone()).await;
-                    tracing::warn!(%job_id, error = %e, "job failed (bg confirm)");
-                    state.emit_event(JobEventInternal {
-                        job_id: job.id,
-                        tenant_id,
-                        state: JobState::Failed,
-                        detail: format!("confirm: {e}"),
-                        at: job.updated_at,
-                    });
-                }
+                fail_confirm_job(&state, tenant_id, job_id, format!("confirm: {e}")).await;
                 return;
             }
         }
     }
-    // Poll budget exhausted — leave the job in Confirming. A later GetJob
-    // call will see it, or the startup-recovery scan can re-attach if the
-    // server restarts.
-    tracing::info!(%job_id, "confirm poll budget exhausted; job left in Confirming");
+    fail_confirm_job(
+        &state,
+        tenant_id,
+        job_id,
+        format!(
+            "confirm timed out after {} polls; requested visibility {:?} was not verified",
+            MAX_CONFIRM_POLLS, requested_visibility
+        ),
+    )
+    .await;
+}
+
+async fn enforce_public_confirmation(
+    http: &reqwest::Client,
+    platform: Platform,
+    requested_visibility: Visibility,
+    handle: &PublishHandle,
+) -> Result<(), PublishError> {
+    if platform != Platform::YouTube || requested_visibility != Visibility::Public {
+        return Ok(());
+    }
+    let verification =
+        multipost_publishers_youtube::verify_public_video(http, &handle.external_id).await?;
+    if verification.is_publicly_available() {
+        return Ok(());
+    }
+    Err(PublishError::Rejected(format!(
+        "youtube public verification failed for {}: playable={}, is_private={:?}, status={:?}, reason={:?}",
+        verification.url,
+        verification.playable,
+        verification.is_private,
+        verification.playability_status,
+        verification.reason
+    )))
+}
+
+async fn fail_confirm_job(state: &AppState, tenant_id: Uuid, job_id: Uuid, detail: String) {
+    if let Ok(Some(mut job)) = state.jobs.get(tenant_id, job_id).await {
+        job.state = JobState::Failed;
+        job.last_error = Some(detail.clone());
+        job.attempts += 1;
+        job.updated_at = Utc::now();
+        let _ = state.jobs.update(job.clone()).await;
+        tracing::warn!(%job_id, error = %detail, "job failed (bg confirm)");
+        state.emit_event(JobEventInternal {
+            job_id: job.id,
+            tenant_id,
+            state: JobState::Failed,
+            detail,
+            at: job.updated_at,
+        });
+    }
 }

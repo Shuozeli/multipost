@@ -22,9 +22,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<String>()
             .replace('\n', " ");
         println!(
-            "  [{:>3}] @{:<18} fav={:>5} rt={:>5} views={:>7} | {}",
+            "  [{:>3}] {} @{:<18} len={:<5} fav={:>5} rt={:>5} views={:>7} | {}",
             i + 1,
+            it.item_id,
             it.author_handle.chars().take(18).collect::<String>(),
+            it.body.chars().count(),
             it.metrics.like_count.unwrap_or(-1),
             it.metrics.share_count.unwrap_or(-1),
             it.metrics.view_count.unwrap_or(-1),

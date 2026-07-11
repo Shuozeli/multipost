@@ -1,0 +1,13 @@
+target/
+.git/
+.pwright/
+.env
+.env.*
+**/*.sqlite
+**/*.sqlite-shm
+**/*.sqlite-wal
+**/*.db
+**/*.log
+**/media/
+scripts/**/.env
+scripts/**/.env.*

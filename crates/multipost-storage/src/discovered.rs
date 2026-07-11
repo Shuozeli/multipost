@@ -189,15 +189,23 @@ fn upsert_one(conn: &Connection, item: &DiscoveredItem) -> DiscoveredResult<()> 
             captured_at    = excluded.captured_at,
             author_handle  = excluded.author_handle,
             author_name    = excluded.author_name,
-            body           = excluded.body,
-            url            = excluded.url,
+            body           = CASE
+                                WHEN length(excluded.body) >= length(discovered_items.body)
+                                THEN excluded.body
+                                ELSE discovered_items.body
+                             END,
+            url            = COALESCE(excluded.url, discovered_items.url),
             read_count     = excluded.read_count,
             like_count     = excluded.like_count,
             comment_count  = excluded.comment_count,
             share_count    = excluded.share_count,
             view_count     = excluded.view_count,
             bookmark_count = excluded.bookmark_count,
-            metadata       = excluded.metadata",
+            metadata       = CASE
+                                WHEN length(excluded.body) >= length(discovered_items.body)
+                                THEN excluded.metadata
+                                ELSE discovered_items.metadata
+                             END",
         params![
             plat_str,
             item.item_id,
@@ -344,6 +352,41 @@ mod tests {
 
         // Assert
         assert_eq!(fetched.unwrap().metrics.read_count, Some(500));
+    }
+
+    #[tokio::test]
+    async fn upsert_keeps_longer_existing_body_and_metadata() {
+        // Arrange
+        let repo = SqliteDiscoveredRepository::in_memory().unwrap();
+        let mut full = sample_item("abc", 100);
+        full.platform = Platform::Twitter;
+        full.body = "complete tweet text with detail-page context".to_string();
+        full.metadata
+            .insert("source".to_string(), serde_json::json!("detail"));
+        repo.upsert(&full).await.unwrap();
+
+        let mut short = sample_item("abc", 500);
+        short.platform = Platform::Twitter;
+        short.body = "short card".to_string();
+        short
+            .metadata
+            .insert("source".to_string(), serde_json::json!("timeline"));
+
+        // Act
+        repo.upsert(&short).await.unwrap();
+        let fetched = repo
+            .get(Platform::Twitter, "abc")
+            .await
+            .unwrap()
+            .expect("row should exist");
+
+        // Assert
+        assert_eq!(fetched.body, "complete tweet text with detail-page context");
+        assert_eq!(fetched.metrics.read_count, Some(500));
+        assert_eq!(
+            fetched.metadata.get("source").and_then(|v| v.as_str()),
+            Some("detail")
+        );
     }
 
     #[tokio::test]

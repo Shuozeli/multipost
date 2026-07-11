@@ -61,6 +61,13 @@ impl CrawlTrait for CrawlService {
         }
 
         let duration = clamp(r.duration_secs, MIN_DURATION_SECS, MAX_DURATION_SECS);
+        let source_urls: Vec<String> = r
+            .source_urls
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let skip_persist = r.skip_persist;
         let job_id = Uuid::new_v4();
         let internal = CrawlJobInternal {
             id: job_id,
@@ -86,7 +93,7 @@ impl CrawlTrait for CrawlService {
         // Run the crawler in a background task.
         let st = self.state.clone();
         tokio::spawn(async move {
-            run_crawl_job(st, job_id, platform, duration).await;
+            run_crawl_job(st, job_id, platform, duration, source_urls, skip_persist).await;
         });
 
         Ok(Response::new(to_proto(
@@ -235,7 +242,14 @@ impl CrawlService {
 
 /// The background worker. Drives the platform's crawler, persists items
 /// to the SQLite repo, and updates the in-memory job state.
-async fn run_crawl_job(state: Arc<AppState>, job_id: Uuid, platform: Platform, duration: u32) {
+async fn run_crawl_job(
+    state: Arc<AppState>,
+    job_id: Uuid,
+    platform: Platform,
+    duration: u32,
+    source_urls: Vec<String>,
+    skip_persist: bool,
+) {
     transition(&state, job_id, |j| {
         j.state = ProtoCrawlJobState::CrawlStateRunning;
     });
@@ -250,7 +264,15 @@ async fn run_crawl_job(state: Arc<AppState>, job_id: Uuid, platform: Platform, d
 
     let opts = CrawlOptions {
         duration_secs: duration as u64,
+        source_urls,
         ..Default::default()
+    };
+    let _permit = match state.crawl_permits.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(e) => {
+            fail(&state, job_id, &format!("crawl permit closed: {e}"));
+            return;
+        }
     };
     let result = crawler.run(&opts).await;
 
@@ -258,12 +280,13 @@ async fn run_crawl_job(state: Arc<AppState>, job_id: Uuid, platform: Platform, d
         Ok(items) => {
             // Persist before marking complete so a fast GetJob can also
             // succeed via ListItems.
-            if !items.is_empty()
+            if !skip_persist
+                && !items.is_empty()
                 && let Err(e) = state.discovered.upsert_many(&items).await
             {
                 warn!(%job_id, error = %e, "discovered.upsert_many failed");
             }
-            info!(%job_id, count = items.len(), "crawl complete");
+            info!(%job_id, count = items.len(), skip_persist, "crawl complete");
             transition(&state, job_id, |j| {
                 j.items_captured = items.len() as u32;
                 j.items = items;

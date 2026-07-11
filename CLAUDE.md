@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-06-11T04:59:04Z -->
 # multipost — agent guide
 
 Pure-Rust gRPC service for **cross-posting one piece of content to many social
@@ -8,6 +9,72 @@ your own dashboard analytics back.
 Read this first, then `README.md` (quick start + gRPC surface) and
 `docs/design.md` (deep design; §5 abstractions, §8 browser pattern, §22 the
 thin-executor redesign). Phase/roadmap status lives in `docs/tasks.md`.
+
+## Multipost identity / when to use this repo
+
+When a user says **"Multipost"**, **"multipost"**, or asks for the social
+video uploader under Shuozeli, this is the repo:
+
+- Local path: `/home/cyuan/projects/multipost`
+- GitHub remote: `https://github.com/shuozeli/multipost.git`
+- CLI binary: `multipost`
+- Server binary: `multipost-server`
+
+Do not use `dragb/experimental/yuanchenxi/strict_poster` as the implementation
+source for platform publishing. That project is only a caller/client of
+Multipost for text/image posts. Do not create new one-off Douyin upload scripts
+when Multipost already has the platform publisher; extend this repo instead.
+
+For generated video pipelines, the correct boundary is:
+
+1. The video project produces a reviewed `publish_package.json` plus local
+   assets such as final MP4, thumbnail, title, caption, hashtags, and visibility.
+2. Multipost handles platform upload, confirmation, and deletion through its
+   `Posts`, `Media`, and `Accounts` services.
+3. The video project records the resulting Multipost job id / platform receipt
+   back into its publish journal or delivery receipt.
+
+Current Douyin video path:
+
+```bash
+# Server, usually on the machine that can reach the logged-in Chrome.
+MULTIPOST_DEV_NO_AUTH=1 cargo run -p multipost-server -- --data-dir /tmp/mp
+
+# Register the logged-in Douyin Chrome once. For Alienware Chrome over CDP:
+multipost accounts register-douyin \
+  --cdp-url http://alienware-win-yuacx:9222 \
+  --ssh-host alienware-win-yuacx \
+  --ssh-user cyuan \
+  --remote-temp-dir 'C:/Users/cyuan/Videos/multipost-uploads'
+
+# Publish a reviewed local video. Use --account-id if more than one Douyin
+# account is connected. --public maps to Visibility::Public.
+multipost post \
+  --to douyin \
+  --video /path/to/final.mp4 \
+  --title "视频标题" \
+  --description "视频文案 #标签" \
+  --public
+
+multipost watch <job-id>
+```
+
+Douyin-specific guardrails:
+
+- The Douyin publisher is in `crates/multipost-publishers/douyin/`.
+- It SCP-stages the local video to the Chrome host, then uses
+  `DOM.setFileInputFiles`; do not assume the server filesystem is visible to
+  Chrome.
+- It must wait for Douyin upload completion (`重新上传` / `替换视频`) before filling
+  the form or clicking `发布`; otherwise Douyin can silently drop the incomplete
+  upload.
+- `confirm()` verifies the creator manage page row by title and treats `审核中`
+  as pending. Do not report a Douyin upload as successful solely because
+  `Submit` returned `Confirming`; use `watch`, `GetJob`, or the manage-page
+  confirmation result.
+- Douyin custom cover upload is not part of the current publisher contract.
+  If a video pipeline needs a Douyin cover, prefer burning the large cover text
+  into the first seconds of the MP4 until a real cover asset flow is added here.
 
 ## Workspace map
 

@@ -49,7 +49,7 @@ async fn preupload(
     let url = format!(
         "https://member.bilibili.com/preupload?\
          name={}&size={}&r=upos&profile=ugcfx%2Fbup&ssl=0\
-         &version=2.14.0.0&build=2140000&upcdn=bldsa\
+         &version=2.14.0.0&build=2140000&upcdn=txa\
          &probe_version=20221109&zone=cs&os=upos&biz_id=171",
         urlencoding::encode(filename),
         file_size,
@@ -85,10 +85,14 @@ async fn init_upload(
     endpoint: &str,
     upos_path: &str,
     auth: &str,
+    file_size: u64,
+    part_size: usize,
+    biz_id: u64,
 ) -> Result<String> {
     let url = format!(
-        "{}/{}?uploads&output=json&os=upos&profile=ugcfx%2Fbup",
-        endpoint, upos_path,
+        "{}/{}?uploads=&output=json&profile=ugcfx%2Fbup&filesize={}\
+         &partsize={}&biz_id={}",
+        endpoint, upos_path, file_size, part_size, biz_id,
     );
     let resp: InitResponse = client
         .post(&url)
@@ -279,7 +283,11 @@ pub async fn upload_and_submit(
     debug!(endpoint = %endpoint, upos_path = %upos_path, "bilibili: preupload OK");
 
     // 2. Init
-    let upload_id = init_upload(&client, creds, &endpoint, &upos_path, &pre.auth).await?;
+    let part_size = pre.chunk_size.unwrap_or(CHUNK_SIZE);
+    let upload_id = init_upload(
+        &client, creds, &endpoint, &upos_path, &pre.auth, file_size, part_size, pre.biz_id,
+    )
+    .await?;
     debug!(upload_id = %upload_id, "bilibili: init OK");
 
     let sess = UploadSession {
@@ -323,14 +331,22 @@ pub async fn upload_and_submit(
         "up_close_danmu": false,
         "up_close_reply": false,
         "up_selection_reply": false,
+        "web_os": 1,
+        "watermark": {"state": 0},
         "dtime": 0,
         "csrf": sess.creds.bili_jct,
+        "csrf_token": sess.creds.bili_jct,
     });
 
+    let submit_url = format!(
+        "https://member.bilibili.com/x/vu/web/add/v3?csrf={}",
+        urlencoding::encode(&sess.creds.bili_jct)
+    );
     let resp: SubmitResponse = sess
         .client
-        .post("https://member.bilibili.com/x/vu/web/add/v3")
+        .post(submit_url)
         .header("Cookie", sess.creds.cookie_header())
+        .header("Origin", "https://member.bilibili.com")
         .header(
             "Referer",
             "https://member.bilibili.com/platform/upload/video/frame",

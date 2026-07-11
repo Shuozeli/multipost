@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-06-09T06:38:49Z -->
 # multipost
 
 A pure-Rust gRPC service for **cross-posting to social platforms**, plus
@@ -19,10 +20,10 @@ The server is a multi-tenant gRPC API; callers submit posts and either long-poll
 
 | Platform | Auth | Publish | Images | Confirm | Delete | Tested live |
 |---|---|---|---|---|---|---|
-| **YouTube** | OAuth 2.0 + PKCE | Video upload (Data API v3) | — | Polling | API delete | ✓ |
+| **YouTube** | OAuth 2.0 + PKCE, or Studio Chrome cookies | Video upload (Data API v3 or Studio CDP) | Custom thumbnail | Polling / Studio completion | API delete / manual Studio delete | ✓ |
 | **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | — | `freepublish/get` (partial) | API delete | ✓ draft path |
 | **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | — | Polls manage page | Clicks 删除作品 | ✓ |
-| **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor (CDP) | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ |
+| **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor; video upload form fill is mapped but final publish is blocked by UI submit behavior | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ text/image |
 | **Twitter / X** | Chrome profile cookies | Inline composer (CDP) | ✓ tweet (≤4) | Immediate | caret → Delete | ✓ |
 
 Images on the cookie-auth platforms are streamed into the remote Chrome over CDP
@@ -48,10 +49,10 @@ multipost/
     ├── multipost-storage      JSON repos (accounts/jobs/media/tenants) + SQLite (discovered, stats)
     ├── multipost-orchestrator job state machine types
     ├── multipost-publishers/
-    │   ├── youtube            API   (OAuth + resumable upload)
+    │   ├── youtube            API/CDP (OAuth resumable upload + Studio browser fallback)
     │   ├── wx-gzh             API   (stable_token + draft/add + freepublish)
     │   ├── douyin             CDP   (SCP staging + DOM.setFileInputFiles)
-    │   ├── toutiao            CDP   (editor + 微头条 + images; + stats collector)
+    │   ├── toutiao            CDP   (video upload + editor + 微头条 + images; + stats collector)
     │   └── twitter            CDP   (inline composer + images; + stats collector)
     ├── multipost-crawlers/
     │   ├── toutiao            pwright network-listen → decode 推荐 feed
@@ -119,16 +120,26 @@ export MULTIPOST_API_KEY=<the-key>
 # 3b. Cookie-auth platforms point at a Chrome already logged into the account.
 ./target/release/multipost accounts register-toutiao --cdp-url http://<chrome-host>:<port>
 ./target/release/multipost accounts register-twitter --cdp-url http://<chrome-host>:<port> --handle <handle>
+./target/release/multipost accounts register-youtube-studio \
+  --cdp-url http://<chrome-host>:<port> \
+  --ssh-host <chrome-host> --ssh-user <user> \
+  --display-name "Channel Name" --handle "@channelhandle"
 
-# 4. Post. Text, or images (--image is repeatable; mutually exclusive with --video).
+# 4. Post. Text, images (--image is repeatable), or video.
 ./target/release/multipost post --to wx-gzh --title "Hello world" --description "..."
 ./target/release/multipost post --to toutiao,twitter --description "今日速览" --image a.png --image b.jpg
+./target/release/multipost post --to youtube --video final.mp4 --thumbnail cover.jpg \
+  --title "昨夜星辰" --description "..." --public
+./target/release/multipost post \
+  --account-id <toutiao-account-id> --account-id <douyin-account-id> \
+  --video final.mp4 --title "今日视频标题" --description "..." --public
 
 # 5. Watch the job to terminal.
 ./target/release/multipost watch <job-id>
 
 # 6. Read side: crawl the public feed, or collect your own profile stats.
 ./target/release/multipost crawl --platform twitter --duration 30
+./target/release/multipost crawl --platform youtube --url https://www.youtube.com/@flipradio_fearnation/videos --duration 30
 ./target/release/multipost stats collect --platform toutiao --max-posts 100
 ./target/release/multipost stats posts   --platform toutiao    # latest per-post numbers
 ```
@@ -147,6 +158,55 @@ cargo test --workspace
 ```
 
 For local development, set `MULTIPOST_DEV_NO_AUTH=1` on the server to bypass the API-key check; all requests are then bound to `tenant_id=00000000-0000-0000-0000-000000000000`. Production deploys must not set it.
+
+## Crawl scheduler service
+
+`multipost-server` can also keep the discovery store warm without a caller
+submitting crawl jobs. Set:
+
+```bash
+PWRIGHT_BIN=/usr/local/bin/pwright
+PWRIGHT_CDP=http://alienware-win-yuacx.tail8f3b66.ts.net:9222
+MULTIPOST_CRAWL_ENABLED=1
+MULTIPOST_CRAWL_PLATFORMS=youtube,toutiao,twitter
+MULTIPOST_CRAWL_DURATION_SECS=30
+MULTIPOST_CRAWL_INTERVAL_SECS=900
+MULTIPOST_YOUTUBE_CRAWL_URLS=https://www.youtube.com/@flipradio_fearnation/videos
+```
+
+Scheduled crawls run serially and upsert into
+`$MULTIPOST_DATA_DIR/discovered.sqlite`. The same global crawler permit also
+serializes manual `Crawl.Submit` requests, because pwright CLI active-tab state
+is shared by working directory.
+
+`GET /healthz` returns service and scheduler state:
+
+```json
+{
+  "status": "ok",
+  "db": "ok",
+  "crawl": {
+    "registered_platforms": ["youtube", "toutiao", "twitter"],
+    "available_permits": 1,
+    "in_flight_jobs": 0
+  },
+  "crawl_scheduler": {
+    "enabled": true,
+    "configured_platforms": ["youtube"],
+    "running_platform": null,
+    "last_runs": {
+      "youtube": {
+        "items_captured": 60,
+        "last_error": null
+      }
+    }
+  }
+}
+```
+
+The Docker image builds `multipost-server` and `multipost`, but the runtime must
+provide the `pwright` CLI at `$PWRIGHT_BIN` (for example by deriving the image or
+mounting the binary).
 
 ## Prototype scripts
 

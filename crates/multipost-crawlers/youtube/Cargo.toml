@@ -1,25 +1,20 @@
 [package]
-name = "multipost-publishers-youtube"
+name = "multipost-crawlers-youtube"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "YouTube Data API v3 publisher for multipost."
+description = "YouTube channel page crawler for multipost (drives pwright via subprocess)."
 
 [dependencies]
 multipost-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-futures-util.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs"] }
-tokio-tungstenite.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
-uuid.workspace = true
