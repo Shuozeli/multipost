@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-14T15:51:09Z -->
+<!-- agent-updated: 2026-07-19T04:26:37Z -->
 # multipost — Tasks
 
 Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architecture.md` for the system shape.
@@ -26,7 +26,10 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
   `--privacy public`.
 - [x] **YouTube Studio CDP fallback** — YouTube accounts can now be registered
   with `accounts register-youtube-studio` and publish via a logged-in Studio
-  Chrome profile when OAuth/Data API credentials are unavailable.
+  Chrome profile when OAuth/Data API credentials are unavailable. Studio
+  credentials now carry an optional stable `channel_id`; registration uses the
+  YouTube `UC...` channel ID as `external_id` when supplied, while retaining the
+  user-facing handle for Studio navigation and account drift checks.
 - [x] **YouTube Studio false-success guard** — Studio publishing now requires a
   concrete `youtu.be/<id>` upload-result link before returning a handle; Studio
   public uploads click the final `Publish` button instead of the draft `Save`
@@ -38,8 +41,15 @@ Phase tracking. See `docs/design.md` §18 for phase definitions, `docs/architect
   action clicks to visible enabled controls, waits for the active Visibility step
   instead of matching background page text, verifies the selected radio state, and
   waits for the detail page to show the requested final visibility before
-  returning. CLI `verify youtube --video-id` / `--url` exposes the same
-  public-page check for post-publish audits.
+  returning. The final action and visibility checks accept both English and
+  Chinese YouTube Studio labels, and CDP `/json/version` parsing now preserves a
+  response snippet in the error context for diagnosing proxy/login-page drift.
+  CLI `verify youtube --video-id` / `--url` exposes the same public-page check
+  for post-publish audits.
+- [x] **YouTube Studio delete path** — Studio/CDP YouTube accounts can now
+  delete a confirmed upload by opening the video edit page, using the visible
+  `Options` / `Delete` action, confirming the dialog, and then marking the job
+  cancelled. This was validated against Coding Context video `EspvFf3R71g`.
 - [x] **Douyin video publisher** — `crates/multipost-publishers/douyin/` stages
   video files onto the Chrome host over SCP, uploads via `DOM.setFileInputFiles`,
   waits for upload completion before clicking `发布`, selects requested

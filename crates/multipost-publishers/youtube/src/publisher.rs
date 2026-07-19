@@ -608,13 +608,8 @@ impl Publisher for YouTubePublisher {
 
     async fn delete(&self, ctx: &PublishContext<'_>, handle: &PublishHandle) -> Result<()> {
         if studio::StudioCredentials::is_studio(ctx.credentials) {
-            return Err(PublishError::Other(anyhow::anyhow!(
-                "youtube studio delete is not implemented; delete {} manually in YouTube Studio",
-                handle
-                    .permalink
-                    .as_deref()
-                    .unwrap_or(handle.external_id.as_str())
-            )));
+            let credentials = studio::parse_credentials(ctx.credentials)?;
+            return studio::delete(&credentials, handle).await;
         }
         let access_token = read_access_token(ctx.credentials)?;
         let resp = self

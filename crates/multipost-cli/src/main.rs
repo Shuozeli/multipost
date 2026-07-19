@@ -429,6 +429,9 @@ enum AccountsAction {
         /// Optional cached channel handle, e.g. `@newfinnews`.
         #[arg(long, default_value = "")]
         handle: String,
+        /// Stable YouTube channel ID, e.g. `UC...`.
+        #[arg(long, default_value = "")]
+        channel_id: String,
     },
 }
 
@@ -1179,6 +1182,7 @@ async fn handle_accounts(
             remote_temp_dir,
             display_name,
             handle,
+            channel_id,
         } => {
             let creds = serde_json::json!({
                 "kind": "studio_cdp",
@@ -1190,6 +1194,7 @@ async fn handle_accounts(
                 "remote_temp_dir": remote_temp_dir,
                 "display_name": display_name,
                 "handle": handle,
+                "channel_id": channel_id,
             })
             .to_string();
             let resp = client

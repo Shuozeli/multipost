@@ -592,7 +592,7 @@ impl Accounts for AccountsService {
                 let mut creds: StudioCredentials =
                     serde_json::from_str(&r.credentials_json).map_err(|e| {
                         Status::invalid_argument(format!(
-                            "credentials_json must be {{kind:'studio_cdp', cdp_url, display_name?, handle?}}: {e}"
+                            "credentials_json must be {{kind:'studio_cdp', cdp_url, display_name?, handle?, channel_id?}}: {e}"
                         ))
                     })?;
                 if creds.kind.is_empty() {
@@ -642,10 +642,12 @@ impl Accounts for AccountsService {
                     } else {
                         creds.display_name.clone()
                     },
-                    external_id: if creds.handle.is_empty() {
-                        creds.cdp_url.clone()
-                    } else {
+                    external_id: if !creds.channel_id.is_empty() {
+                        creds.channel_id.clone()
+                    } else if !creds.handle.is_empty() {
                         creds.handle.clone()
+                    } else {
+                        creds.cdp_url.clone()
                     },
                     auth_status: AuthStatus::Active,
                     credentials: probe_creds,

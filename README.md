@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-06-09T06:38:49Z -->
+<!-- agent-updated: 2026-07-19T04:26:37Z -->
 # multipost
 
 A pure-Rust gRPC service for **cross-posting to social platforms**, plus
@@ -20,7 +20,7 @@ The server is a multi-tenant gRPC API; callers submit posts and either long-poll
 
 | Platform | Auth | Publish | Images | Confirm | Delete | Tested live |
 |---|---|---|---|---|---|---|
-| **YouTube** | OAuth 2.0 + PKCE, or Studio Chrome cookies | Video upload (Data API v3 or Studio CDP) | Custom thumbnail | Polling / Studio completion | API delete / manual Studio delete | ✓ |
+| **YouTube** | OAuth 2.0 + PKCE, or Studio Chrome cookies | Video upload (Data API v3 or Studio CDP) | Custom thumbnail | Polling / Studio completion | API delete / Studio CDP delete | ✓ |
 | **WeChat MP** (公众号) | `stable_token` (appid + secret) | Article draft + `freepublish/submit` | — | `freepublish/get` (partial) | API delete | ✓ draft path |
 | **Douyin** (抖音) | Chrome profile cookies | Browser-automated video upload | — | Polls manage page | Clicks 删除作品 | ✓ |
 | **Toutiao** (头条号) | Chrome profile cookies | 微头条 + article editor; video upload form fill is mapped but final publish is blocked by UI submit behavior | ✓ 微头条 (≤9) | Auto-saved / dashboard poll | Drafts UI / 微头条 删除 | ✓ text/image |
@@ -123,7 +123,7 @@ export MULTIPOST_API_KEY=<the-key>
 ./target/release/multipost accounts register-youtube-studio \
   --cdp-url http://<chrome-host>:<port> \
   --ssh-host <chrome-host> --ssh-user <user> \
-  --display-name "Channel Name" --handle "@channelhandle"
+  --display-name "Channel Name" --handle "@channelhandle" --channel-id UC...
 
 # 4. Post. Text, images (--image is repeatable), or video.
 ./target/release/multipost post --to wx-gzh --title "Hello world" --description "..."

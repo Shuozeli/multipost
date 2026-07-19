@@ -47,6 +47,9 @@ pub struct StudioCredentials {
     /// Cached channel handle, e.g. `@newfinnews`.
     #[serde(default)]
     pub handle: String,
+    /// Stable YouTube channel ID, e.g. `UC...`.
+    #[serde(default)]
+    pub channel_id: String,
 }
 
 impl StudioCredentials {
@@ -221,8 +224,7 @@ async fn drive_upload(
             .context("open youtube studio page")?;
         page.wait_for_loadish().await?;
         page.click_upload_entry().await?;
-        page.wait_for_text("Upload videos", Duration::from_secs(30))
-            .await?;
+        page.wait_for_upload_picker(Duration::from_secs(30)).await?;
         page.set_first_file_input(video_remote_path).await?;
         page.wait_for_text("Details", Duration::from_secs(60))
             .await?;
@@ -257,6 +259,40 @@ async fn drive_upload(
     result.map_err(|e: anyhow::Error| PublishError::Other(e))
 }
 
+pub(crate) async fn delete(credentials: &StudioCredentials, handle: &PublishHandle) -> Result<()> {
+    if extract_video_id_from_external(&handle.external_id).is_none() {
+        return Err(PublishError::Other(anyhow!(
+            "youtube studio delete requires a video id external_id, got {:?}",
+            handle.external_id
+        )));
+    }
+    let browser = BrowserSession::connect(&credentials.cdp_url)
+        .await
+        .map_err(|e| PublishError::Transient(format!("youtube studio CDP: {e}")))?;
+    let target = browser
+        .create_tab(&format!(
+            "https://studio.youtube.com/video/{}/edit",
+            handle.external_id
+        ))
+        .await
+        .map_err(|e| PublishError::Transient(format!("youtube studio open video edit tab: {e}")))?;
+    let target_id = target.id.clone();
+    let result = async {
+        let mut page = browser
+            .open_page(&target)
+            .await
+            .context("open youtube studio video edit page")?;
+        page.wait_for_loadish().await?;
+        page.wait_for_text_any(&["Details", "详细信息"], Duration::from_secs(45))
+            .await?;
+        page.ensure_video_edit_page(&handle.external_id).await?;
+        page.click_delete_forever().await
+    }
+    .await;
+    let _ = browser.close_tab(&target_id).await;
+    result.map_err(|e: anyhow::Error| PublishError::Other(e))
+}
+
 fn extract_description(content: &Content) -> &str {
     if let Some(idx) = content.text.find('\n') {
         content.text[idx + 1..].trim_start()
@@ -283,6 +319,19 @@ fn extract_video_id(link: &str) -> Option<String> {
                 .collect()
         })
         .filter(|s: &String| !s.is_empty())
+}
+
+fn extract_video_id_from_external(external_id: &str) -> Option<String> {
+    let trimmed = external_id.trim();
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && !trimmed.is_empty()
+    {
+        Some(trimmed.to_string())
+    } else {
+        extract_video_id(trimmed)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -419,12 +468,18 @@ async fn resolve_ws_url(http_url: &str) -> AnyResult<String> {
     let port = parsed
         .port()
         .ok_or_else(|| anyhow!("cdp_url has no explicit port"))?;
-    let info = reqwest::get(format!("{}/json/version", http_url.trim_end_matches('/')))
+    let version_body = reqwest::get(format!("{}/json/version", http_url.trim_end_matches('/')))
         .await
         .context("GET /json/version")?
-        .json::<JsonVersion>()
+        .text()
         .await
-        .context("parse /json/version")?;
+        .context("read /json/version")?;
+    let info: JsonVersion = serde_json::from_str(&version_body).with_context(|| {
+        format!(
+            "parse /json/version body={}",
+            version_body.chars().take(500).collect::<String>()
+        )
+    })?;
     let rest = info
         .web_socket_debugger_url
         .splitn(4, '/')
@@ -569,6 +624,18 @@ impl PageSession {
         Err(anyhow!("timed out waiting for text {needle:?}"))
     }
 
+    async fn wait_for_text_any(&mut self, needles: &[&str], timeout: Duration) -> AnyResult<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            let text = self.body_text().await.unwrap_or_default();
+            if needles.iter().any(|needle| text.contains(needle)) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(anyhow!("timed out waiting for any text {:?}", needles))
+    }
+
     async fn click_upload_entry(&mut self) -> AnyResult<()> {
         let clicked = self
             .evaluate(
@@ -590,6 +657,42 @@ impl PageSession {
             return Err(anyhow!("could not click YouTube Studio upload entry"));
         }
         Ok(())
+    }
+
+    async fn wait_for_upload_picker(&mut self, timeout: Duration) -> AnyResult<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            let ready = self
+                .evaluate(
+                    r#"
+                    (() => {
+                      const body = document.body ? document.body.innerText : '';
+                      if (/Upload videos|上传视频/i.test(body)) return true;
+                      const visible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                          s.visibility !== 'hidden' && s.display !== 'none';
+                      };
+                      return [...document.querySelectorAll('input[type=file]')]
+                        .some(input => {
+                          const dialog = input.closest('ytcp-uploads-dialog, tp-yt-paper-dialog');
+                          return !dialog || visible(dialog);
+                        });
+                    })()
+                    "#,
+                )
+                .await?
+                .as_bool()
+                .unwrap_or(false);
+            if ready {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(anyhow!(
+            "timed out waiting for YouTube Studio upload picker"
+        ))
     }
 
     async fn set_first_file_input(&mut self, path: &str) -> AnyResult<()> {
@@ -779,6 +882,164 @@ impl PageSession {
         Ok(())
     }
 
+    async fn ensure_video_edit_page(&mut self, video_id: &str) -> AnyResult<()> {
+        let expected = serde_json::to_string(video_id)?;
+        let ok = self
+            .evaluate(&format!(
+                r#"
+                (() => {{
+                  const expected = {expected};
+                  const url = location.href;
+                  return url.includes(`/video/${{expected}}/edit`) ||
+                    url.includes(`/video/${{expected}}/`) ||
+                    url.includes(`video_id=${{expected}}`);
+                }})()
+                "#
+            ))
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !ok {
+            return Err(anyhow!(
+                "refusing to delete: YouTube Studio edit page does not match video id {video_id}"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn click_delete_forever(&mut self) -> AnyResult<()> {
+        let opened = self
+            .evaluate(
+                r#"
+                (() => {
+                  const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                      s.visibility !== 'hidden' && s.display !== 'none';
+                  };
+                  const enabled = (el) =>
+                    !el.disabled && !el.hasAttribute('disabled') &&
+                    el.getAttribute('aria-disabled') !== 'true';
+                  const buttons = [...document.querySelectorAll('ytcp-icon-button, tp-yt-paper-icon-button, button, [role=button]')];
+                  const byLabel = buttons.find(b => {
+                    const label = (b.getAttribute('aria-label') || b.innerText || b.textContent || '').trim();
+                    return visible(b) && enabled(b) &&
+                      /more actions|options|更多操作|更多选项|选项/i.test(label);
+                  });
+                  const candidate = byLabel || buttons.reverse().find(b => {
+                    const label = (b.getAttribute('aria-label') || b.innerText || b.textContent || '').trim();
+                    const icon = b.querySelector('yt-icon, iron-icon')?.getAttribute('icon') || '';
+                    return visible(b) && enabled(b) &&
+                      (/more_vert|menu|overflow/i.test(icon) || /更多|more/i.test(label));
+                  });
+                  if (!candidate) return false;
+                  candidate.click();
+                  return true;
+                })()
+                "#,
+            )
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !opened {
+            return Err(anyhow!("could not open YouTube Studio video action menu"));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let clicked_delete = self
+            .evaluate(
+                r#"
+                (() => {
+                  const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                      s.visibility !== 'hidden' && s.display !== 'none';
+                  };
+                  const items = [...document.querySelectorAll('tp-yt-paper-item, ytcp-menu-service-item-renderer, [role=menuitem], [role=button], button')];
+                  const hit = items.find(e => {
+                    const text = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
+                    return visible(e) && /^(delete|delete forever|永久删除|删除)$/i.test(text);
+                  });
+                  if (!hit) return false;
+                  hit.click();
+                  return true;
+                })()
+                "#,
+            )
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !clicked_delete {
+            let menu_text = self
+                .evaluate(
+                    r#"
+                    (() => [...document.querySelectorAll('tp-yt-paper-item, ytcp-menu-service-item-renderer, [role=menuitem], button, [role=button]')]
+                      .filter(el => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                          s.visibility !== 'hidden' && s.display !== 'none';
+                      })
+                      .map(el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '))
+                      .filter(Boolean)
+                      .slice(0, 80)
+                      .join(' | '))()
+                    "#,
+                )
+                .await
+                .unwrap_or(Value::Null)
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            return Err(anyhow!(
+                "could not click YouTube Studio Delete forever menu item; visible menu/buttons: {menu_text}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let confirmed = self
+            .evaluate(
+                r#"
+                (() => {
+                  const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                      s.visibility !== 'hidden' && s.display !== 'none';
+                  };
+                  const enabled = (el) =>
+                    !el.disabled && !el.hasAttribute('disabled') &&
+                    el.getAttribute('aria-disabled') !== 'true';
+                  const dialogs = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, ytcp-ve, body')].filter(visible);
+                  const root = dialogs[0] || document;
+                  const checkbox = [...root.querySelectorAll('tp-yt-paper-checkbox, ytcp-checkbox-lit, input[type=checkbox], [role=checkbox]')]
+                    .find(visible);
+                  if (checkbox) checkbox.click();
+                  const buttons = [...root.querySelectorAll('ytcp-button, button, [role=button]')].reverse();
+                  const action = buttons.find(b => {
+                    const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
+                    return visible(b) && enabled(b) && /delete forever|永久删除|删除/i.test(text);
+                  });
+                  if (!action) return false;
+                  action.click();
+                  return true;
+                })()
+                "#,
+            )
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !confirmed {
+            return Err(anyhow!(
+                "could not confirm YouTube Studio Delete forever dialog"
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok(())
+    }
+
     async fn wait_until_upload_ready(&mut self) -> AnyResult<()> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
         while tokio::time::Instant::now() < deadline {
@@ -797,15 +1058,17 @@ impl PageSession {
     }
 
     async fn click_final_visibility_action(&mut self, visibility: Visibility) -> AnyResult<()> {
-        let label = match visibility {
-            Visibility::Public => "publish",
-            Visibility::Private | Visibility::Unlisted | Visibility::Followers => "save",
+        let labels = match visibility {
+            Visibility::Public => r#"["publish","发布"]"#,
+            Visibility::Private | Visibility::Unlisted | Visibility::Followers => {
+                r#"["save","保存"]"#
+            }
         };
         let ok = self
             .evaluate(&format!(
                 r#"
                 (() => {{
-                  const wanted = "{label}";
+                  const wanted = {labels};
                   const visible = (el) => {{
                     const r = el.getBoundingClientRect();
                     const s = window.getComputedStyle(el);
@@ -816,7 +1079,7 @@ impl PageSession {
                   const hit = buttons.find(b => {{
                     const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
                     const disabled = b.disabled || b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true';
-                    return visible(b) && !disabled && text === wanted;
+                    return visible(b) && !disabled && wanted.includes(text);
                   }});
                   if (hit) {{ hit.click(); return true; }}
                   return false;
@@ -828,7 +1091,7 @@ impl PageSession {
             .unwrap_or(false);
         if !ok {
             return Err(anyhow!(
-                "could not click final YouTube Studio {label} button"
+                "could not click final YouTube Studio action button"
             ));
         }
         Ok(())
@@ -836,9 +1099,14 @@ impl PageSession {
 
     async fn wait_for_final_visibility_state(&mut self, visibility: Visibility) -> AnyResult<()> {
         let expected = match visibility {
-            Visibility::Public => "Public",
-            Visibility::Unlisted | Visibility::Followers => "Unlisted",
-            Visibility::Private => "Private",
+            Visibility::Public => "Public/公开",
+            Visibility::Unlisted | Visibility::Followers => "Unlisted/不公开",
+            Visibility::Private => "Private/私享",
+        };
+        let labels = match visibility {
+            Visibility::Public => r#"["Public","公开"]"#,
+            Visibility::Unlisted | Visibility::Followers => r#"["Unlisted","不公开"]"#,
+            Visibility::Private => r#"["Private","Private video","私享","私密"]"#,
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         while tokio::time::Instant::now() < deadline {
@@ -848,9 +1116,11 @@ impl PageSession {
                     (() => {{
                       const body = document.body?.innerText || '';
                       if (body.includes('This video is in a draft state')) return false;
-                      const expected = "{expected}";
+                      if (body.includes('此视频处于草稿状态')) return false;
+                      const labels = {labels};
                       const normalized = body.replace(/\r/g, '');
-                      if (new RegExp('Video quality\\n(?:.*\\n)*?Visibility\\n' + expected).test(normalized)) {{
+                      const statusBlocks = ['Visibility', '可见性', '公开范围'];
+                      if (labels.some(label => statusBlocks.some(block => normalized.includes(`${{block}}\n${{label}}`)))) {{
                         return true;
                       }}
                       const visible = (el) => {{
@@ -861,7 +1131,14 @@ impl PageSession {
                       }};
                       return [...document.querySelectorAll('ytcp-text-dropdown-trigger, ytcp-dropdown-trigger, [role=button], div')]
                         .filter(visible)
-                        .some(el => (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ') === `Visibility ${{expected}}`);
+                        .some(el => {{
+                          const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+                          return labels.some(label =>
+                            text === `Visibility ${{label}}` ||
+                            text === `可见性 ${{label}}` ||
+                            text === `公开范围 ${{label}}`
+                          );
+                        }});
                     }})()
                     "#
                 ))

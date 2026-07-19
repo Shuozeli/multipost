@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-07-19T04:26:37Z -->
 # multipost — Design Doc
 
 **Status**: Draft v0.2 (2026-05-15)
@@ -432,8 +433,8 @@ table accounts {
   id            uuid pk
   user_id       uuid       # multi-tenant from day 1
   platform      enum
-  display_name  string     # e.g. @handle
-  external_id   string     # platform-side account ID
+  display_name  string     # user-facing account/channel name
+  external_id   string     # platform-side stable account ID (YouTube Studio: UC... channel ID)
   credentials   bytes      # AES-GCM encrypted JSON
   auth_status   enum       # Active | Expired | Revoked
   capabilities  json       # cached from /me endpoint
@@ -499,6 +500,11 @@ table oauth_states {
   created_at    timestamptz
 }
 ```
+
+YouTube Studio CDP accounts store the stable `UC...` channel ID in `external_id`
+when available. The user-facing handle (`@...`), channel ID, and display name
+also live in encrypted credentials so Studio automation can navigate by handle
+while registry matching uses the stable channel identifier.
 
 DB: PostgreSQL at `docker.yuacx.com:5432` (per `infra-defaults`). Migrations via quiver-orm's migration engine if available, else `sqlx migrate`.
 
