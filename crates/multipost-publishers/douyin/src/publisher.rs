@@ -483,9 +483,16 @@ async fn run_upload_flow(
         .await
         .map_err(|e| PublishError::Transient(format!("douyin setFileInputFiles: {e}")))?;
 
-    wait_for_url_match(page, "/creator-micro/content/post", Duration::from_secs(60))
-        .await
-        .map_err(|e| PublishError::Transient(format!("douyin upload transition: {e}")))?;
+    wait_for_any_url_match(
+        page,
+        &[
+            "/creator-micro/content/post",
+            "/creator-micro/content/publish",
+        ],
+        Duration::from_secs(60),
+    )
+    .await
+    .map_err(|e| PublishError::Transient(format!("douyin upload transition: {e}")))?;
 
     let _ = dismiss_tooltips(page).await;
 
@@ -774,16 +781,24 @@ async fn wait_for_url_match(
     needle: &str,
     deadline: Duration,
 ) -> anyhow::Result<()> {
+    wait_for_any_url_match(page, &[needle], deadline).await
+}
+
+async fn wait_for_any_url_match(
+    page: &mut PageSession,
+    needles: &[&str],
+    deadline: Duration,
+) -> anyhow::Result<()> {
     let start = Instant::now();
     loop {
         let url = page.evaluate("location.href").await?;
         let url = url.as_str().unwrap_or("");
-        if url.contains(needle) {
+        if needles.iter().any(|needle| url.contains(needle)) {
             tracing::info!(url, "douyin: URL transitioned");
             return Ok(());
         }
         if start.elapsed() > deadline {
-            anyhow::bail!("timed out waiting for URL {needle:?} (last seen: {url})");
+            anyhow::bail!("timed out waiting for URL {:?} (last seen: {url})", needles);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
