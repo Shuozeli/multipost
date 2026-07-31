@@ -244,9 +244,16 @@ async fn drive_upload(
         page.wait_until_upload_ready().await?;
         page.click_final_visibility_action(content.visibility)
             .await?;
-        page.wait_for_final_visibility_state(content.visibility)
-            .await?;
         let permalink = page.wait_for_youtu_link(Duration::from_secs(90)).await?;
+        if let Err(err) = page
+            .wait_for_final_visibility_state(content.visibility)
+            .await
+        {
+            tracing::warn!(
+                error = %err,
+                "youtube studio final visibility text was not verified after permalink appeared"
+            );
+        }
         let external_id = extract_video_id(&permalink)
             .ok_or_else(|| anyhow!("YouTube Studio returned a permalink without a video id"))?;
         Ok(PublishHandle {
@@ -760,33 +767,68 @@ impl PageSession {
 
     async fn click_next(&mut self, count: usize) -> AnyResult<()> {
         for _ in 0..count {
-            let ok = self
-                .evaluate(
-                    r#"
-                    (() => {
-                      const visible = (el) => {
-                        const r = el.getBoundingClientRect();
-                        const s = window.getComputedStyle(el);
-                        return r.width > 0 && r.height > 0 &&
-                          s.visibility !== 'hidden' && s.display !== 'none';
-                      };
-                      const enabled = (el) =>
-                        !el.disabled && !el.hasAttribute('disabled') &&
-                        el.getAttribute('aria-disabled') !== 'true';
-                      const buttons = [...document.querySelectorAll('ytcp-button, button')].reverse();
-                      const next = buttons.find(b => {
-                        const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
-                        return visible(b) && enabled(b) && /^(next|下一步)$/i.test(text);
-                      });
-                      if (next) { next.click(); return true; }
-                      return false;
-                    })()
-                    "#,
-                )
-                .await?
-                .as_bool()
-                .unwrap_or(false);
-            if !ok {
+            // YouTube Studio transiently disables "Next" during the Checks /
+            // processing steps. Poll for a visible+enabled Next button instead
+            // of clicking once, so we don't race the disabled state.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let mut clicked = false;
+            while tokio::time::Instant::now() < deadline {
+                let ok = self
+                    .evaluate(
+                        r#"
+                        (() => {
+                          const visible = (el) => {
+                            const r = el.getBoundingClientRect();
+                            const s = window.getComputedStyle(el);
+                            return r.width > 0 && r.height > 0 &&
+                              s.visibility !== 'hidden' && s.display !== 'none';
+                          };
+                          const enabled = (el) =>
+                            !el.disabled && !el.hasAttribute('disabled') &&
+                            el.getAttribute('aria-disabled') !== 'true';
+                          const buttons = [...document.querySelectorAll('ytcp-button, button')].reverse();
+                          const next = buttons.find(b => {
+                            const text = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
+                            return visible(b) && enabled(b) && /^(next|下一步)$/i.test(text);
+                          });
+                          if (next) { next.click(); return true; }
+                          return false;
+                        })()
+                        "#,
+                    )
+                    .await?
+                    .as_bool()
+                    .unwrap_or(false);
+                if ok {
+                    clicked = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
+            if !clicked {
+                let dump = self
+                    .evaluate(
+                        r#"
+                        (() => {
+                          const vis = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'; };
+                          const btns = [...document.querySelectorAll('ytcp-button, button')].filter(vis).map(b => ({
+                            t: (b.innerText||b.textContent||'').trim().slice(0,40),
+                            al: (b.getAttribute('aria-label')||'').slice(0,40),
+                            dis: b.disabled || b.hasAttribute('disabled') || b.getAttribute('aria-disabled')==='true'
+                          }));
+                          const kids = [...document.querySelectorAll('tp-yt-paper-radio-button, [role=radio]')].filter(vis).map(r => ({
+                            name: r.getAttribute('name')||'', t:(r.innerText||'').trim().slice(0,40), checked: r.getAttribute('aria-checked')||r.getAttribute('active')||r.checked||''
+                          }));
+                          const headers = [...document.querySelectorAll('h1, #dialog-title, .ytcp-uploads-dialog')].filter(vis).map(h=>(h.innerText||'').trim().slice(0,60)).slice(0,4);
+                          return JSON.stringify({headers, buttons: btns, radios: kids});
+                        })()
+                        "#,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                tracing::warn!(dom = %dump, "click_next: no enabled Next button found");
                 return Err(anyhow!("could not click Next in YouTube Studio"));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
