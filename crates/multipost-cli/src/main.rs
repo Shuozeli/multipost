@@ -1324,6 +1324,16 @@ async fn handle_post(server: &str, auth: AuthInterceptor, args: PostArgs) -> any
 
     let mut account_ids: Vec<String> = explicit_account_ids;
     for p in &target_platforms {
+        // If the caller already passed an explicit --account-id for this
+        // platform, honor it and skip auto-resolution (which otherwise bails
+        // when the platform has >1 connected account and the picker UI is
+        // still unbuilt).
+        if accounts
+            .iter()
+            .any(|a| a.platform == *p as i32 && account_ids.contains(&a.id))
+        {
+            continue;
+        }
         let matching: Vec<&_> = accounts
             .iter()
             .filter(|a| a.platform == *p as i32)
