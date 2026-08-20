@@ -534,7 +534,7 @@ async fn run_upload_flow(
                 return Err(PublishError::Rejected(format!(
                     "Douyin form has no '{}' radio (individual accounts may lack this option). \
                      Refusing to publish to avoid leaking a 'private' upload as public.",
-                    selectors::VISIBILITY_PRIVATE_LABEL
+                    selectors::VISIBILITY_PRIVATE_LABELS.join("' / '")
                 )));
             }
             _ => {
@@ -587,21 +587,23 @@ struct VisibilitySelection {
 
 /// Click the visibility radio that matches the requested `Visibility`.
 async fn select_visibility(page: &mut PageSession, vis: Visibility) -> Result<VisibilitySelection> {
-    let label = match vis {
-        Visibility::Public => selectors::VISIBILITY_PUBLIC_LABEL,
-        Visibility::Followers => selectors::VISIBILITY_FRIENDS_LABEL,
-        Visibility::Unlisted | Visibility::Private => selectors::VISIBILITY_PRIVATE_LABEL,
+    let labels: &[&str] = match vis {
+        Visibility::Public => &[selectors::VISIBILITY_PUBLIC_LABEL],
+        Visibility::Followers => &[selectors::VISIBILITY_FRIENDS_LABEL],
+        Visibility::Unlisted | Visibility::Private => selectors::VISIBILITY_PRIVATE_LABELS,
     };
     // Match against `<label class="radio-*">…<span>公开</span></label>` (Semi
     // Design's radio markup), as confirmed by `scripts/douyin/07_probe_form.py`.
-    let label_json = serde_json::to_string(label)
+    // `want` is a list of accepted labels (Douyin renames these across UI
+    // versions, e.g. 私密 -> 仅自己可见), and we click the first exact match.
+    let label_json = serde_json::to_string(labels)
         .map_err(|e| PublishError::Other(anyhow::anyhow!("serialize label: {e}")))?;
     let js = format!(
         r#"(() => {{
             const want = {label_json};
             for (const el of document.querySelectorAll('label')) {{
                 const text = (el.innerText || '').trim();
-                if (text === want && el.offsetParent !== null) {{
+                if (want.includes(text) && el.offsetParent !== null) {{
                     el.click();
                     return {{ok: true, label: text}};
                 }}

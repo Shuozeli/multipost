@@ -23,8 +23,10 @@ pub const DESCRIPTION_EDITOR: &str =
 pub const VISIBILITY_PUBLIC_LABEL: &str = "公开";
 /// "好友可见" (Friends) visibility radio label.
 pub const VISIBILITY_FRIENDS_LABEL: &str = "好友可见";
-/// "私密" (Private) visibility radio label, if present on the account type.
-pub const VISIBILITY_PRIVATE_LABEL: &str = "私密";
+/// Private visibility radio label(s), if present on the account type. Douyin
+/// renamed 私密 -> 仅自己可见; accept both the current and legacy labels so a
+/// future rename does not silently break private selection.
+pub const VISIBILITY_PRIVATE_LABELS: &[&str] = &["仅自己可见", "私密"];
 
 /// "立即发布" (Publish now) radio label.
 pub const SCHEDULE_NOW_LABEL: &str = "立即发布";
